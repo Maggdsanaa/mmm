@@ -1,1 +1,6 @@
-cGx1Z2lucyB7CiAgICBpZCgiY29tLmFuZHJvaWQuYXBwbGljYXRpb24iKSB2ZXJzaW9uICI4LjUuMiIgYXBwbHkgZmFsc2UKICAgIGlkKCJvcmcuamV0YnJhaW5zLmtvdGxpbi5hbmRyb2lkIikgdmVyc2lvbiAiMS45LjI0IiBhcHBseSBmYWxzZQogICAgaWQoIm9yZy5qZXRicmFpbnMua290bGluLnBsdWdpbi5zZXJpYWxpemF0aW9uIikgdmVyc2lvbiAiMS45LjI0IiBhcHBseSBmYWxzZQogICAgaWQoImNvbS5nb29nbGUuZGV2dG9vbHMua3NwIikgdmVyc2lvbiAiMS45LjI0LTEuMC4yMCIgYXBwbHkgZmFsc2UKfQo=
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+    id("com.android.library") version "8.5.2" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+    id("com.google.devtools.ksp") version "1.9.24-1.0.20" apply false
+}
