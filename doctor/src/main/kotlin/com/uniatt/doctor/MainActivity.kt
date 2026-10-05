@@ -1,5 +1,7 @@
 package com.uniatt.doctor
 
+import android.net.ConnectivityManager
+import android.net.Network
 import android.nfc.NfcAdapter
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -18,11 +20,18 @@ class MainActivity : ComponentActivity() {
     private var nfc: NfcAdapter? = null
     private lateinit var reader: AttendanceReader
     private var tick by mutableIntStateOf(0)
+    private var cm: ConnectivityManager? = null
+    private val netCallback = object : ConnectivityManager.NetworkCallback() {
+        // أول ما يتصل الهاتف بالإنترنت نزامن تلقائيًا (كشف جديد + رفع الحضور)
+        override fun onAvailable(network: Network) { runOnUiThread { vm.syncNow() } }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         nfc = NfcAdapter.getDefaultAdapter(this)
+        SyncWorker.schedule(applicationContext)
         reader = AttendanceReader(vm.dao, vm::onScan) { vm.active.value }
+        reader.scheduleOf = { id -> vm.scheduleText(id, withRoom = false) }
 
         // وضع القارئ يعمل فقط أثناء ظهور الشاشة وجلسة نشطة
         lifecycleScope.launch {
@@ -43,6 +52,18 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        vm.syncNow()
+        cm = getSystemService(ConnectivityManager::class.java)
+        try { cm?.registerDefaultNetworkCallback(netCallback) } catch (_: Exception) {}
+    }
+
+    override fun onStop() {
+        try { cm?.unregisterNetworkCallback(netCallback) } catch (_: Exception) {}
+        super.onStop()
     }
 
     override fun onResume() { super.onResume(); tick++ }

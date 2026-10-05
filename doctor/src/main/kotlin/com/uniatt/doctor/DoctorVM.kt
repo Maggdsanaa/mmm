@@ -9,7 +9,6 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -60,76 +59,95 @@ class DoctorVM(app: Application) : AndroidViewModel(app) {
         if (hash(pin) == prefs.getString("pin", null)) loggedIn.value = true else message.value = "رمز الدخول خاطئ"
     }
 
-    // ---- ملف الكشف القادم من المسؤول (واتساب/إيميل) ----
+    // ---- الربط بالمسؤول (مسح QR مرة واحدة) والمزامنة التلقائية ----
     val doctorId get() = prefs.getString("id", "") ?: ""
     val doctorName get() = prefs.getString("name", "") ?: ""
     val epoch get() = prefs.getLong("epoch", -1L)
-    val linked = MutableStateFlow(prefs.getString("id", null) != null)
-    val importing = MutableStateFlow(false)
-    val pendingFile = MutableStateFlow<ByteArray?>(null)
-    val pendingHint = MutableStateFlow<String?>(null)
+    val paired = MutableStateFlow(prefs.getString("mbox", null) != null)
+    /** وصل كشف واحد على الأقل (فيه اسمي ومواد وطلاب). */
+    val linked = MutableStateFlow(prefs.getLong("epoch", -1L) >= 0)
+    val syncing = MutableStateFlow(false)
+    val syncInfo = MutableStateFlow("")
+    /** يزيد بعد كل مزامنة لإعادة رسم الشاشة (الاسم والإصدار يُقرآن من التخزين). */
+    val version = MutableStateFlow(0)
 
-    fun pickRoster(bytes: ByteArray?) {
-        pendingFile.value = bytes
-        pendingHint.value = bytes?.let { Box.hint(Box.MAGIC_ROSTER, it) }
-        if (bytes != null && pendingHint.value == null) message.value = "هذا ليس ملف كشف صالحًا"
+    // ---- الجدول (يحدّده المسؤول) ----
+    fun slots(): List<RSlot> = Schedule.decode(prefs.getString("slots", null))
+
+    /** نص مواعيد مادة (يُرسل أيضًا للطالب مع بياناته). */
+    fun scheduleText(courseId: Long, withRoom: Boolean = true): String = Schedule.describeAll(slots(), courseId, withRoom)
+
+    /** المحاضرة الجارية الآن حسب الجدول (أو التي تبدأ خلال 15 دقيقة) مع الدقائق المتبقية. */
+    suspend fun nowSlot(): Pair<CourseSection, Int>? {
+        val cal = java.util.Calendar.getInstance()
+        val day = cal.get(java.util.Calendar.DAY_OF_WEEK) - 1
+        val now = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
+        val sl = Schedule.current(slots(), day, now) ?: return null
+        val c = dao.coursesOnce().firstOrNull { it.id == sl.courseId } ?: return null
+        return c to (sl.endMin - maxOf(now, sl.startMin)).coerceIn(1, 240)
     }
 
-    fun importRoster(codeInput: String) = viewModelScope.launch {
-        val bytes = pendingFile.value ?: run { message.value = "اختر ملف الكشف أولًا"; return@launch }
-        val code = Codes.normalize(codeInput) ?: run { message.value = "الكود غير صحيح — راجع الخانات (12 خانة)"; return@launch }
-        importing.value = true
-        val roster = withContext(Dispatchers.Default) { Roster.open(bytes, code) }
-        if (roster == null) {
-            importing.value = false
-            message.value = "تعذّر فتح الملف: الكود خاطئ أو الملف تالف/معدَّل"
-            return@launch
-        }
-        if (linked.value && roster.doctorId != doctorId) {
-            importing.value = false
-            message.value = "هذا الكشف يخص دكتورًا آخر (${roster.doctorName}) ولا يمكن دمجه هنا"
-            return@launch
-        }
-        if (roster.epoch < epoch) {
-            importing.value = false
-            message.value = "هذا الكشف أقدم من الكشف المستورد سابقًا — اطلب الأحدث من الإدارة"
-            return@launch
-        }
+    private fun fmtNow() = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date())
 
-        val ids = roster.courses.map { it.id }
-        roster.courses.forEach { dao.upsertCourse(CourseSection(it.id, it.code, it.name, it.section)) }
-        dao.clearEnrollments(ids)
-        var resetCount = 0
-        for (r in roster.students) {
-            val old = dao.student(r.studentId)
-            val keep = old != null && old.tag == r.tag          // وسم جديد = كود جديد = يُلغى ربط الجهاز القديم
-            if (old != null && !keep && old.publicKeyHex != null) resetCount++
-            dao.upsertStudent(StudentEntity(r.studentId, r.name, r.faculty, r.major, r.level, r.section,
-                r.tag, r.keyHex, if (keep) old?.publicKeyHex else null))
-            r.courseIds.filter { it in ids }.forEach { dao.enroll(Enrollment(r.studentId, it)) }
-        }
-
-        prefs.edit().putString("id", roster.doctorId).putString("name", roster.doctorName)
-            .putLong("epoch", roster.epoch).putString("code", code).apply()
-        linked.value = true
-        if (selectedCourseId.value == null) selectedCourseId.value = ids.firstOrNull()
-        pendingFile.value = null; pendingHint.value = null
-        importing.value = false
-        message.value = "تم استيراد الكشف: ${roster.students.size} طالب في ${roster.courses.size} مادة" +
-            if (resetCount > 0) "\nأُلغي ربط $resetCount جهاز بسبب أكواد جديدة من الإدارة" else ""
+    private fun describe(r: DoctorSync.Result): String = when {
+        r.error != null -> "⚠ ${r.error}"
+        r.offline -> "لا اتصال بالإنترنت — تتم المزامنة تلقائيًا عند توفّره"
+        r.notPaired -> "امسح QR من هاتف المسؤول للربط"
+        r.waitingAdmin -> "تمّ الربط. بانتظار أن ينشر المسؤول كشفك (يحتاج اتصالًا بالإنترنت عنده)"
+        else -> "آخر مزامنة ${fmtNow()}" + (if (r.rosterUpdated) " — وصل كشف جديد (إصدار $epoch)" else "") +
+            (if (r.uploaded) " — رُفع الحضور للمسؤول" else "")
     }
 
-    // ---- إعادة الحضور للمسؤول (ملف مشفّر بكود الدكتور) ----
-    /** يكتب الملف في مجلد الكاش ويعيده للمشاركة. */
-    suspend fun buildAttendanceExport(): File? = withContext(Dispatchers.IO) {
-        val code = prefs.getString("code", null) ?: return@withContext null
-        val did = doctorId.ifBlank { return@withContext null }
-        val sess = dao.allSessions().map { ASession(it.sessionId, it.courseSectionId, it.startedAt, it.durationMin) }
-        val recs = dao.allAttendance().map { ARecord(it.sessionId, it.studentId, it.timestamp) }
-        val binds = dao.boundStudents().map { ABinding(it.studentId, it.tag, it.publicKeyHex!!) }
-        val blob = AttendanceFile(did, epoch, sess, recs, binds).seal(code)
-        val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-        File(dir, "attendance_$did.uat").also { it.writeBytes(blob) }
+    /** [manual] = ضغط المستخدم الزر، فتظهر النتيجة في نافذة. */
+    fun syncNow(manual: Boolean = false) {
+        viewModelScope.launch {
+            if (!paired.value) { if (manual) message.value = "امسح QR من هاتف المسؤول أولًا"; return@launch }
+            if (syncing.value) return@launch
+            syncing.value = true
+            val r = DoctorSync.run(getApplication())
+            syncing.value = false
+            linked.value = prefs.getLong("epoch", -1L) >= 0
+            version.value++
+            if (selectedCourseId.value == null) selectedCourseId.value = dao.coursesOnce().firstOrNull()?.id
+            syncInfo.value = describe(r)
+            if (r.rosterUpdated && r.resetCount > 0) {
+                message.value = "وصل كشف جديد. أُلغي ربط ${r.resetCount} جهاز بسبب أكواد جديدة من الإدارة."
+            } else if (manual || r.error != null) message.value = syncInfo.value
+        }
+    }
+
+    /** يُستدعى بنتيجة مسح الـQR. */
+    fun pairFromQr(text: String?) {
+        val info = text?.let { Pairing.parse(it) }
+        if (info == null) { message.value = "هذا ليس رمز ربط صالحًا من تطبيق المسؤول"; return }
+        val curId = prefs.getString("id", null)
+        if (curId != null && curId != info.doctorId) {
+            message.value = "هذا الهاتف مرتبط بدكتور آخر ($curId). امسح بياناته أولًا (زر «فك الارتباط ومسح البيانات»)."
+            return
+        }
+        val newBox = prefs.getString("mbox", null) != info.mailbox
+        prefs.edit().putString("id", info.doctorId).putString("code", info.code)
+            .putString("mbox", info.mailbox).putString("relay", info.relayUrl).apply()
+        if (newBox) prefs.edit().putLong("epoch", -1L).remove("ackEpoch").remove("attHash").apply()   // QR جديد بعد «إلغاء الربط»
+        paired.value = true
+        linked.value = prefs.getLong("epoch", -1L) >= 0
+        version.value++
+        syncNow(manual = true)
+    }
+
+    /** فك الارتباط ومسح كل البيانات المحلية (كشف + حضور). يُبقي رمز القفل. */
+    fun unpairAndWipe() {
+        viewModelScope.launch {
+            active.value = null
+            withContext(Dispatchers.IO) {
+                AppDb.get(getApplication()).clearAllTables()
+                prefs.edit().remove("id").remove("name").remove("epoch").remove("slots").remove("code").remove("mbox")
+                    .remove("relay").remove("ackEpoch").remove("attHash").apply()
+            }
+            paired.value = false; linked.value = false; selectedCourseId.value = null
+            syncInfo.value = ""; version.value++
+            message.value = "تم فك الارتباط ومسح البيانات."
+        }
     }
 
     // ---- الجلسات ----

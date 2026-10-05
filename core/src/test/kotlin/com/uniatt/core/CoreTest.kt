@@ -132,4 +132,62 @@ class CoreTest {
         assertEquals(f, back)
         assertNull(AttendanceFile.open(f.seal(code), Codes.random()))
     }
+
+    // ---- الاقتران عبر QR والترحيل ----
+    @Test fun pairingRoundTrip() {
+        val code = Codes.random(); val mbox = Pairing.newMailbox()
+        val info = Pairing.Info("https://demo-default-rtdb.firebaseio.com", mbox, "D1", code)
+        assertEquals(info, Pairing.parse(Pairing.format(info)))
+        assertEquals(code, Pairing.parse(Pairing.format(info).replace(code, Codes.format(code).lowercase()))?.code)
+    }
+
+    @Test fun pairingRejectsBadInput() {
+        val code = Codes.random(); val mbox = Pairing.newMailbox()
+        val txt = Pairing.format(Pairing.Info("https://x.firebaseio.com", mbox, "D1", code))
+        assertNull(Pairing.parse("UAQ1|a"))
+        assertNull(Pairing.parse(txt.replace("UAQ1", "UAQ2")))
+        assertNull(Pairing.parse(txt.replace("https://", "http://")))
+        assertNull(Pairing.parse(txt.replace(mbox, mbox.substring(1))))
+        val bad = code.substring(0, 11) + (if (code[11] == '0') '1' else '0')
+        assertNull(Pairing.parse(txt.replace(code, bad)))
+    }
+
+    @Test fun jsonStringCodec() {
+        val weird = "سطر 1\nسطر \"2\"\t\\ end \u0001"
+        assertEquals(weird, Json.unquote(Json.quote(weird)))
+        assertNull(Json.unquote("123"))
+        assertNull(Json.unquote("null"))
+    }
+
+    // ---- الجدول ----
+    @Test fun scheduleTimeParsing() {
+        assertEquals(8 * 60 + 30, Schedule.parseTime("8:30"))
+        assertEquals(8 * 60 + 30, Schedule.parseTime("08:30"))
+        assertEquals(8 * 60 + 30, Schedule.parseTime("\u0668:\u0663\u0660"))     // ٨:٣٠
+        assertEquals(8 * 60 + 30, Schedule.parseTime("0830"))
+        assertNull(Schedule.parseTime("25:00")); assertNull(Schedule.parseTime("8:5")); assertNull(Schedule.parseTime("abc"))
+        assertEquals("08:05", Schedule.fmt(8 * 60 + 5))
+    }
+
+    @Test fun scheduleCurrentAndOverlap() {
+        val a = RSlot(1, 0, 8 * 60, 9 * 60 + 30, "B1")
+        val b = RSlot(2, 0, 9 * 60, 10 * 60)
+        assertTrue(Schedule.overlaps(a, b))
+        assertFalse(Schedule.overlaps(a, RSlot(2, 0, 9 * 60 + 30, 10 * 60)))   // تلاصق بلا تداخل
+        assertFalse(Schedule.overlaps(a, RSlot(2, 1, 8 * 60, 9 * 60)))         // يوم آخر
+        assertEquals(a, Schedule.current(listOf(a, b), 0, 7 * 60 + 50))        // قبل البدء بـ10 دقائق
+        assertNull(Schedule.current(listOf(a), 0, 7 * 60 + 30))                // مبكر جدًا
+        assertNull(Schedule.current(listOf(a), 0, 9 * 60 + 30))                // انتهى
+        assertNull(Schedule.current(listOf(a), 3, 8 * 60 + 30))                // يوم آخر
+    }
+
+    @Test fun scheduleRosterAndStorageRoundTrip() {
+        val slots = listOf(RSlot(1, 0, 480, 570, "قاعة 3"), RSlot(1, 2, 600, 690), RSlot(2, 4, 720, 810, "B1"))
+        val r = Roster(7, "D1", "د. خالد", listOf(RCourse(1, "CS101", "برمجة", "A"), RCourse(2, "M1", "رياضيات", "B")), emptyList(), slots)
+        assertEquals(slots, Roster.parse(r.toText())?.slots)
+        val code = Codes.random()
+        assertEquals(slots, Roster.open(r.seal(code), code)?.slots)
+        assertEquals(listOf(RSlot(1, 0, 480, 570, "قاعة 3")), Schedule.decode(Schedule.encode(listOf(slots[0]))))
+        assertEquals("الأحد 08:00–09:30 (قاعة 3)، الثلاثاء 10:00–11:30", Schedule.describeAll(slots, 1))
+    }
 }

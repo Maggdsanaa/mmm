@@ -9,35 +9,148 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class AdminVM(app: Application) : AndroidViewModel(app) {
     private val store = AdminStore(app)
-    private val lock = Mutex()
     val state = MutableStateFlow(store.load())
     val busy = MutableStateFlow(false)
     val message = MutableStateFlow<String?>(null)
+    val syncing = MutableStateFlow(false)
+    val syncInfo = MutableStateFlow("")
+    private var syncAgain = false
 
-    /** يطبّق تعديلًا على الحالة ويحفظها (تسلسليًا). */
-    private suspend fun mutate(f: (AdminState) -> AdminState) = lock.withLock {
-        val s = f(state.value)
-        withContext(Dispatchers.IO) { store.save(s) }
-        state.value = s
+    /** يطبّق تعديلًا على الأحدث من القرص (الواجهة وعامل الخلفية يكتبان معًا) ثم يحدّث الشاشة. */
+    private suspend fun mutate(f: (AdminState) -> AdminState) {
+        state.value = withContext(Dispatchers.IO) { store.update(f) }
+    }
+
+    /** عند الرجوع للتطبيق: قد يكون عامل الخلفية غيّر الحالة (حضور جديد مثلًا). */
+    fun refresh() { state.value = store.load() }
+
+    // ---- المزامنة التلقائية مع الدكاترة عبر الترحيل ----
+    private fun fmtNow() = SimpleDateFormat("HH:mm", Locale.US).format(Date())
+
+    private fun describe(r: AdminSync.Result): String = when {
+        r.noRelay -> "أدخل عنوان قاعدة Firebase أولًا"
+        r.offline -> "لا اتصال بالإنترنت — تتم المزامنة تلقائيًا عند توفّره"
+        else -> "آخر مزامنة ${fmtNow()}: نُشر ${r.pushed} كشف، ${r.newRecords} تسجيل حضور جديد" +
+            if (r.errors.isNotEmpty()) "\n⚠ " + r.errors.joinToString("\n⚠ ") else ""
+    }
+
+    /** [manual] = المستخدم ضغط الزر، فنعرض النتيجة في نافذة؛ وإلا تبقى في سطر الحالة فقط. */
+    fun syncNow(manual: Boolean = false) {
+        viewModelScope.launch {
+            if (syncing.value) { syncAgain = true; return@launch }
+            syncing.value = true
+            do {
+                syncAgain = false
+                val r = try { AdminSync.run(store) } catch (e: Exception) { AdminSync.Result(errors = listOf(e.message ?: "خطأ")) }
+                refresh()
+                syncInfo.value = describe(r)
+                if (manual) message.value = syncInfo.value
+            } while (syncAgain)
+            syncing.value = false
+        }
+    }
+
+    fun setRelay(input: String) = viewModelScope.launch {
+        val url = Pairing.normalizeUrl(input) ?: run { message.value = "العنوان يجب أن يبدأ بـ https:// (مثل https://xxxx-default-rtdb.firebaseio.com)"; return@launch }
+        val old = state.value.relayUrl
+        mutate { it.copy(relayUrl = url) }
+        if (old.isNotBlank() && old != url && state.value.doctors.isNotEmpty())
+            message.value = "تغيّر العنوان: على كل دكتور مسح QR جديد من تبويب الدكاترة."
+        syncNow(manual = old.isBlank() || old == url)
+    }
+
+    /** نص رمز الـQR الذي يمسحه الدكتور مرة واحدة. */
+    fun pairingText(doctorId: String): String? {
+        val st = state.value
+        val d = st.doctors.firstOrNull { it.doctorId == doctorId } ?: return null
+        val url = Pairing.normalizeUrl(st.relayUrl) ?: return null
+        if (d.mailbox.isBlank()) return null
+        return Pairing.format(Pairing.Info(url, d.mailbox, d.doctorId, d.code))
     }
 
     private fun courseKey(c: Course) = "${c.code}-${c.section}".lowercase()
 
+    /** مادة/شعبة جديدة؛ إن وُجدت (نفس الرمز والشعبة) يُحدَّث اسمها فقط. */
     fun addCourse(code: String, name: String, section: String) = viewModelScope.launch {
-        if (state.value.courses.any { it.code.equals(code, true) && it.section.equals(section, true) }) {
-            message.value = "المادة/الشعبة موجودة"; return@launch
+        val dup = state.value.courses.firstOrNull { it.code.equals(code, true) && it.section.equals(section, true) }
+        if (dup != null) {
+            if (dup.name == name) { message.value = "المادة/الشعبة موجودة"; return@launch }
+            mutate { s -> s.copy(courses = s.courses.map { if (it.id == dup.id) it.copy(name = name) else it }) }
+            syncNow()
+            message.value = "تم تحديث اسم المادة إلى «$name»"
+            return@launch
         }
         mutate { s ->
             val id = s.seq + 1
             s.copy(seq = id, courses = s.courses + Course(id, code, name, section))
         }
+        syncNow()
+    }
+
+    /** يحذف المادة مع مواعيدها ويشيلها من الطلاب والدكاترة. */
+    fun deleteCourse(id: Long) = viewModelScope.launch {
+        mutate { s -> s.copy(
+            courses = s.courses.filter { it.id != id },
+            slots = s.slots.filter { it.courseId != id },
+            students = s.students.map { it.copy(courseIds = it.courseIds - id) },
+            doctors = s.doctors.map { it.copy(courseIds = it.courseIds - id) }) }
+        syncNow()
+    }
+
+    // ---- الجدول الأسبوعي ----
+    fun addSlot(courseId: Long, day: Int, start: String, end: String, room: String) = viewModelScope.launch {
+        val a = Schedule.parseTime(start); val b = Schedule.parseTime(end)
+        if (a == null || b == null) { message.value = "الوقت بصيغة 08:30 (ساعتان:دقيقتان)"; return@launch }
+        val slot = RSlot(courseId, day, a, if (b == 0) 1440 else b, room.trim())
+        if (!Schedule.valid(slot)) { message.value = "وقت النهاية يجب أن يكون بعد البداية"; return@launch }
+        val cur = state.value
+        if (cur.slots.any { it.courseId == courseId && it.day == day && it.startMin == a && it.endMin == slot.endMin }) {
+            message.value = "هذا الموعد موجود"; return@launch
+        }
+        // تنبيه (لا منع): دكتور عنده محاضرتان متداخلتان، أو نفس القاعة مشغولة
+        val warn = ArrayList<String>()
+        val docs = cur.doctors.filter { courseId in it.courseIds }
+        for (d in docs) for (o in cur.slots.filter { it.courseId in d.courseIds && it.courseId != courseId })
+            if (Schedule.overlaps(slot, RSlot(o.courseId, o.day, o.startMin, o.endMin)))
+                warn.add("⚠ ${d.name} عنده محاضرة أخرى متداخلة: ${Schedule.describe(RSlot(o.courseId, o.day, o.startMin, o.endMin), false)}")
+        if (slot.room.isNotBlank()) for (o in cur.slots.filter { it.room.equals(slot.room, true) && it.courseId != courseId })
+            if (Schedule.overlaps(slot, RSlot(o.courseId, o.day, o.startMin, o.endMin)))
+                warn.add("⚠ القاعة ${slot.room} مشغولة في هذا الوقت")
+        mutate { s -> val id = s.seq + 1; s.copy(seq = id, slots = s.slots + Slot(id, courseId, day, a, slot.endMin, slot.room)) }
+        syncNow()
+        if (warn.isNotEmpty()) message.value = "تمت إضافة الموعد.\n" + warn.distinct().joinToString("\n")
+    }
+
+    fun deleteSlot(id: Long) = viewModelScope.launch {
+        mutate { s -> s.copy(slots = s.slots.filter { it.id != id }) }
+        syncNow()
+    }
+
+    /** وصف جدول مادة (للعرض). */
+    fun scheduleText(courseId: Long): String =
+        Schedule.describeAll(state.value.slots.map { RSlot(it.courseId, it.day, it.startMin, it.endMin, it.room) }, courseId)
+
+    // ---- حذف طالب/دكتور ----
+    fun deleteStudent(id: String) = viewModelScope.launch {
+        mutate { s -> s.copy(students = s.students.filter { it.studentId != id }, bindings = s.bindings.filter { it.studentId != id }) }
+        syncNow()
+    }
+
+    fun deleteDoctor(id: String) = viewModelScope.launch {
+        val cur = state.value
+        val d0 = cur.doctors.firstOrNull { it.doctorId == id } ?: return@launch
+        val url = Pairing.normalizeUrl(cur.relayUrl)
+        if (url != null && d0.mailbox.isNotBlank())
+            withContext(Dispatchers.IO) { runCatching { Mailbox(Relay(url), d0.mailbox).wipe() } }
+        mutate { s -> s.copy(doctors = s.doctors.filter { it.doctorId != id }) }
     }
 
     private fun lines(text: String) = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
@@ -84,6 +197,7 @@ class AdminVM(app: Application) : AndroidViewModel(app) {
             s.copy(students = byId.values.toList())
         }
         busy.value = false
+        syncNow()
         message.value = "تمت إضافة/تحديث ${done.size} طالب" + if (errors.isNotEmpty()) "\nأخطاء:\n" + errors.joinToString("\n") else ""
     }
 
@@ -98,14 +212,17 @@ class AdminVM(app: Application) : AndroidViewModel(app) {
             if (id.isBlank() || name.isBlank()) { errors.add("سطر ${i + 1}: معرف الدكتور والاسم مطلوبان"); return@forEachIndexed }
             val (ids, missing) = resolve(cur.courses, keys(c.getOrNull(2)))
             if (missing.isNotEmpty()) { errors.add("$id: مواد غير موجودة: ${missing.joinToString(", ")}"); return@forEachIndexed }
+            if (id.contains('|')) { errors.add("$id: معرف الدكتور لا يحتوي على |"); return@forEachIndexed }
             val old = cur.doctors.firstOrNull { it.doctorId == id }
-            made[id] = Doctor(id, name, ids, old?.code ?: Codes.random())
+            made[id] = old?.copy(name = name, courseIds = ids)
+                ?: Doctor(id, name, ids, Codes.random(), mailbox = Pairing.newMailbox())
         }
         mutate { s ->
             val byId = LinkedHashMap(s.doctors.associateBy { it.doctorId })
             byId.putAll(made)
             s.copy(doctors = byId.values.toList())
         }
+        syncNow()
         message.value = "تمت إضافة/تحديث ${made.size} دكتور" + if (errors.isNotEmpty()) "\nأخطاء:\n" + errors.joinToString("\n") else ""
     }
 
@@ -120,69 +237,28 @@ class AdminVM(app: Application) : AndroidViewModel(app) {
             students = s.students.map { if (it.studentId == id) it.copy(code = code, keyHex = key) else it },
             bindings = s.bindings.filter { it.studentId != id }) }
         busy.value = false
-        message.value = "الكود الجديد لـ ${s0.name}: ${Codes.format(code)}\nصدّر كشف دكاترته من جديد وأرسله لهم ليُلغى ربط الجهاز القديم."
+        syncNow()
+        message.value = "الكود الجديد لـ ${s0.name}: ${Codes.format(code)}\nسيصل الكشف المحدَّث لدكاترته تلقائيًا فيُلغى ربط الجهاز القديم."
     }
 
+    /** كود جديد + صندوق بريد جديد: ينقطع الهاتف القديم ويحتاج الدكتور مسح QR جديد. */
     fun resetDoctor(id: String) = viewModelScope.launch {
-        val code = Codes.random()
-        mutate { s -> s.copy(doctors = s.doctors.map { if (it.doctorId == id) it.copy(code = code) else it }) }
-        message.value = "كود الدكتور الجديد: ${Codes.format(code)}\nصدّر كشفه من جديد (الملفات القديمة لن تُفتح بالكود الجديد)."
-    }
-
-    // ---- التصدير: ملف مشفّر لكل دكتور ----
-    private fun safeName(s: String) = s.replace(Regex("[^A-Za-z0-9_-]"), "_")
-    private fun exportsDir() = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-
-    suspend fun exportRoster(doctorId: String): File? {
         val cur = state.value
-        val d = cur.doctors.firstOrNull { it.doctorId == doctorId } ?: return null
-        if (d.courseIds.isEmpty()) { message.value = "لا توجد مواد لهذا الدكتور"; return null }
-        busy.value = true
-        val epoch = cur.epoch + 1
-        mutate { it.copy(epoch = epoch) }
-        val mine = d.courseIds.toSet()
-        val roster = Roster(
-            epoch, d.doctorId, d.name,
-            cur.courses.filter { it.id in mine }.map { RCourse(it.id, it.code, it.name, it.section) },
-            cur.students.filter { s -> s.courseIds.any { it in mine } }.map { s ->
-                RStudent(s.studentId, s.name, s.faculty, s.major, s.level, s.section, s.tag, s.keyHex,
-                    s.courseIds.filter { it in mine })
-            }
-        )
-        val blob = withContext(Dispatchers.Default) { roster.seal(d.code) }
-        val f = withContext(Dispatchers.IO) { File(exportsDir(), "roster_${safeName(d.doctorId)}.uar").also { it.writeBytes(blob) } }
-        busy.value = false
-        return f
+        val d0 = cur.doctors.firstOrNull { it.doctorId == id } ?: return@launch
+        val url = Pairing.normalizeUrl(cur.relayUrl)
+        if (url != null && d0.mailbox.isNotBlank()) {
+            withContext(Dispatchers.IO) { runCatching { Mailbox(Relay(url), d0.mailbox).wipe() } }   // محاولة أفضل جهد لمحو القديم
+        }
+        val code = Codes.random()
+        mutate { s -> s.copy(doctors = s.doctors.map {
+            if (it.doctorId == id) it.copy(code = code, mailbox = Pairing.newMailbox(), rosterHash = "", attHash = "", pushedEpoch = 0, ackEpoch = 0)
+            else it
+        }) }
+        syncNow()
+        message.value = "تم إلغاء ربط ${d0.name}. اعرض له QR جديدًا من تبويب الدكاترة ليمسحه."
     }
 
-    // ---- استيراد الحضور القادم من الدكاترة ----
-    fun importAttendance(bytes: ByteArray?) = viewModelScope.launch {
-        if (bytes == null) { message.value = "تعذّرت قراءة الملف"; return@launch }
-        val did = Box.hint(Box.MAGIC_ATTEND, bytes) ?: run { message.value = "هذا ليس ملف حضور صالحًا"; return@launch }
-        val d = state.value.doctors.firstOrNull { it.doctorId == did } ?: run { message.value = "الدكتور ($did) غير موجود عندك"; return@launch }
-        busy.value = true
-        val f = withContext(Dispatchers.Default) { AttendanceFile.open(bytes, d.code) }
-        if (f == null) {
-            busy.value = false
-            message.value = "تعذّر فتح الملف: قد يكون كود الدكتور تغيّر بعد إنشائه، أو الملف معدَّل"
-            return@launch
-        }
-        var newRecs = 0
-        mutate { s ->
-            val sess = LinkedHashMap(s.sessions.associateBy { it.sessionId })
-            f.sessions.forEach { sess[it.sessionId] = SessionRow(it.sessionId, it.courseId, f.doctorId, it.startedAt) }
-            val recKeys = s.records.map { it.sessionId to it.studentId }.toHashSet()
-            val recs = ArrayList(s.records)
-            f.records.forEach { if (recKeys.add(it.sessionId to it.studentId)) { recs.add(RecordRow(it.sessionId, it.studentId, it.timestamp)); newRecs++ } }
-            val binds = LinkedHashMap(s.bindings.associateBy { it.studentId to it.doctorId })
-            f.bindings.forEach { binds[it.studentId to f.doctorId] = BindingRow(it.studentId, f.doctorId, it.pubHex) }
-            s.copy(sessions = sess.values.toList(), records = recs, bindings = binds.values.toList())
-        }
-        busy.value = false
-        val conflicts = conflicts().size
-        message.value = "تم استيراد حضور ${d.name}: $newRecs تسجيل جديد" +
-            if (conflicts > 0) "\n⚠ يوجد $conflicts طالب بجهازين مختلفين — راجع تبويب التقارير" else ""
-    }
+    private fun exportsDir() = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
 
     /** طلاب ظهر لهم مفتاحا جهاز مختلفان عند دكاترة مختلفين (كود مشارَك أو مكرّر). */
     fun conflicts(): List<Pair<Student, List<String>>> {
@@ -210,10 +286,6 @@ class AdminVM(app: Application) : AndroidViewModel(app) {
 
     fun studentsCsv(): String = "studentId,name,code,device_seen\n" + state.value.students.joinToString("\n") { st ->
         "${st.studentId},${q(st.name)},${Codes.format(st.code)},${state.value.bindings.any { it.studentId == st.studentId }}"
-    }
-
-    fun doctorsCsv(): String = "doctorId,name,code\n" + state.value.doctors.joinToString("\n") {
-        "${it.doctorId},${q(it.name)},${Codes.format(it.code)}"
     }
 
     fun attendanceCsv(): String {
@@ -252,6 +324,7 @@ class AdminVM(app: Application) : AndroidViewModel(app) {
         busy.value = false
         if (restored == null) { message.value = "تعذّرت الاستعادة: الكود خاطئ أو الملف تالف"; return@launch }
         mutate { restored }
+        syncNow()
         message.value = "تمت الاستعادة: ${restored.students.size} طالب، ${restored.doctors.size} دكتور"
     }
 }

@@ -23,6 +23,8 @@ class AttendanceReader(
     private val onEvent: (ScanEvent) -> Unit,
     private val session: () -> ActiveSession?
 ) : NfcAdapter.ReaderCallback {
+    /** يُضبط من MainActivity: نص مواعيد المادة (من جدول المسؤول) ليصل للطالب مع بياناته. */
+    @Volatile var scheduleOf: (Long) -> String = { "" }
 
     private val rnd = SecureRandom()
     @Volatile private var cooldownUntil = 0L
@@ -89,7 +91,10 @@ class AttendanceReader(
             date = fmtDate(req.timeMs), timestamp = req.timeMs, status = "PRESENT"
         )
         val status = if (dao.addAttendance(rec) == -1L) Status.DUPLICATE else Status.OK
-        val courses = dao.coursesOfStudent(st.studentId).map { "${it.code} ${it.name} (${it.section})" }
+        val courses = dao.coursesOfStudent(st.studentId).map {
+            val sched = try { scheduleOf(it.id) } catch (_: Exception) { "" }
+            "${it.code} ${it.name} (${it.section})" + if (sched.isNotBlank()) " — $sched" else ""
+        }
         val profile = StudentProfile(st.studentId, st.name, st.faculty, st.major, st.level, st.section, courses)
         return Outcome(status, st, profile)
     }

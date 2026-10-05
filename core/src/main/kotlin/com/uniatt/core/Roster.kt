@@ -15,13 +15,15 @@ data class RStudent(
 
 data class Roster(
     val epoch: Long, val doctorId: String, val doctorName: String,
-    val courses: List<RCourse>, val students: List<RStudent>
+    val courses: List<RCourse>, val students: List<RStudent>,
+    val slots: List<RSlot> = emptyList()              // جدول المحاضرات (يحدّده المسؤول)
 ) {
     fun toText(): String = buildString {
         append("UAR1\n")
         append("E\t$epoch\n")
         append("D\t${clean(doctorId)}\t${clean(doctorName)}\n")
         courses.forEach { append("C\t${it.id}\t${clean(it.code)}\t${clean(it.name)}\t${clean(it.section)}\n") }
+        slots.forEach { append("T\t${it.courseId}\t${it.day}\t${it.startMin}\t${it.endMin}\t${clean(it.room)}\n") }
         students.forEach {
             append("S\t${clean(it.studentId)}\t${clean(it.name)}\t${clean(it.faculty)}\t${clean(it.major)}\t")
             append("${clean(it.level)}\t${clean(it.section)}\t${it.tag}\t${it.keyHex}\t${it.courseIds.joinToString(";")}\n")
@@ -37,7 +39,7 @@ data class Roster(
             if (lines.firstOrNull() != "UAR1") null
             else {
                 var epoch = -1L; var did = ""; var dname = ""; var haveDoctor = false
-                val courses = ArrayList<RCourse>(); val students = ArrayList<RStudent>()
+                val courses = ArrayList<RCourse>(); val students = ArrayList<RStudent>(); val slots = ArrayList<RSlot>()
                 var bad = false
                 for (line in lines.drop(1)) {
                     val f = line.split('\t')
@@ -45,6 +47,10 @@ data class Roster(
                         "E" -> epoch = f[1].toLong()
                         "D" -> { did = f[1]; dname = f[2]; haveDoctor = true }
                         "C" -> if (f.size == 5) courses.add(RCourse(f[1].toLong(), f[2], f[3], f[4])) else bad = true
+                        "T" -> if (f.size == 6) {
+                            val sl = RSlot(f[1].toLong(), f[2].toInt(), f[3].toInt(), f[4].toInt(), f[5])
+                            if (Schedule.valid(sl)) slots.add(sl) else bad = true
+                        } else bad = true
                         "S" -> if (f.size == 10 && f[7].length == Codes.TAG_LEN && f[8].length == 64)
                             students.add(RStudent(f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8],
                                 f[9].split(';').filter { it.isNotEmpty() }.map { it.toLong() }))
@@ -52,7 +58,7 @@ data class Roster(
                         else -> bad = true
                     }
                 }
-                if (bad || epoch < 0 || !haveDoctor || did.isBlank()) null else Roster(epoch, did, dname, courses, students)
+                if (bad || epoch < 0 || !haveDoctor || did.isBlank()) null else Roster(epoch, did, dname, courses, students, slots)
             }
         } catch (e: Exception) { null }
 

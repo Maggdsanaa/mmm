@@ -19,6 +19,8 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.uniatt.core.fmtTime
 import kotlinx.coroutines.launch
 import java.io.File
@@ -68,7 +70,7 @@ fun LoginScreen(vm: DoctorVM) {
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Spacer(Modifier.height(48.dp))
         Text(if (has) "تسجيل الدخول" else "إنشاء الرمز السري", style = MaterialTheme.typography.headlineMedium)
-        if (!has) Text("رمز يقفل التطبيق على هذا الهاتف (4 خانات على الأقل). مواد الدكتور وطلابه تصل من ملف الكشف.")
+        if (!has) Text("رمز يقفل التطبيق على هذا الهاتف (4 خانات على الأقل). مواد الدكتور وطلابه تصل تلقائيًا من المسؤول بعد مسح QR.")
         F("الرمز السري", pin, pw = true) { pin = it }
         Button(
             onClick = { if (has) vm.login(pin) else vm.register(pin) },
@@ -114,42 +116,52 @@ fun SelectedCourse(vm: DoctorVM): CourseSection? {
 
 @Composable
 fun CoursesScreen(vm: DoctorVM) {
-    val ctx = LocalContext.current
     val courses by vm.courses.collectAsState()
     val sel by vm.selectedCourseId.collectAsState()
+    val paired by vm.paired.collectAsState()
     val linked by vm.linked.collectAsState()
-    val importing by vm.importing.collectAsState()
-    val pending by vm.pendingFile.collectAsState()
-    val hint by vm.pendingHint.collectAsState()
-    var code by remember { mutableStateOf("") }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let {
-            val bytes = try { ctx.contentResolver.openInputStream(it)?.use { s -> s.readBytes() } } catch (_: Exception) { null }
-            vm.pickRoster(bytes)
-        }
-    }
+    val syncing by vm.syncing.collectAsState()
+    val info by vm.syncInfo.collectAsState()
+    val ver by vm.version.collectAsState()
+    var confirmWipe by remember { mutableStateOf(false) }
+    val scanner = rememberLauncherForActivityResult(ScanContract()) { res -> res.contents?.let { vm.pairFromQr(it) } }
+    fun scan() = scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+        .setPrompt("وجّه الكاميرا نحو QR في هاتف المسؤول").setBeepEnabled(false).setOrientationLocked(false))
+
+    if (confirmWipe) AlertDialog(
+        onDismissRequest = { confirmWipe = false },
+        confirmButton = { TextButton(onClick = { confirmWipe = false; vm.unpairAndWipe() }) { Text("مسح") } },
+        dismissButton = { TextButton(onClick = { confirmWipe = false }) { Text("إلغاء") } },
+        text = { Text("سيُفك ارتباط هذا الهاتف بالمسؤول وتُمسح المواد والطلاب وسجلات الحضور منه. تأكد أن الحضور رُفع للمسؤول أولًا.") }
+    )
+
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("كشف الطلاب (ملف من الإدارة)", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        if (linked) "✓ ${vm.doctorName} — إصدار الكشف ${vm.epoch}" else "لم يُستورد كشف بعد. استلم الملف من الإدارة (واتساب/إيميل) وكودك الخاص، ثم اخترهما هنا. لا يلزم إنترنت.",
-                        color = if (linked) Green else Color.Unspecified
-                    )
-                    OutlinedButton(onClick = { picker.launch(arrayOf("*/*")) }) {
-                        Text(if (linked) "استيراد كشف محدَّث" else "اختيار ملف الكشف")
-                    }
-                    if (pending != null) {
-                        Text("الملف المختار للدكتور: ${hint ?: "؟"}", style = MaterialTheme.typography.bodySmall)
-                        F("كود الدكتور (12 خانة)", code) { code = it.take(20) }
-                        Button(onClick = { vm.importRoster(code) }, enabled = code.isNotBlank() && !importing) {
-                            Text(if (importing) "جارٍ الفتح…" else "استيراد")
+                    Text("الربط بالمسؤول", style = MaterialTheme.typography.titleSmall)
+                    if (!paired) {
+                        Text("اطلب من المسؤول أن يعرض لك QR من تطبيقه (تبويب الدكاترة)، ثم صوّره هنا مرة واحدة فقط. بعدها يصلك اسمك ومواد شعبك وطلابك وأي تعديل تلقائيًا عند اتصالك بالإنترنت.")
+                        Button(onClick = { scan() }, modifier = Modifier.fillMaxWidth()) { Text("مسح QR") }
+                    } else {
+                        key(ver) {
+                            Text(
+                                if (linked) "✓ ${vm.doctorName.ifBlank { vm.doctorId }} — إصدار الكشف ${vm.epoch}"
+                                else "✓ تمّ الربط — بانتظار وصول كشفك",
+                                color = if (linked) Green else Color.Unspecified
+                            )
                         }
+                        if (info.isNotBlank()) Text(info, style = MaterialTheme.typography.bodySmall)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { vm.syncNow(manual = true) }, enabled = !syncing) { Text(if (syncing) "جارٍ المزامنة…" else "مزامنة الآن") }
+                            OutlinedButton(onClick = { scan() }) { Text("مسح QR جديد") }
+                        }
+                        TextButton(onClick = { confirmWipe = true }) { Text("فك الارتباط ومسح البيانات", color = Red) }
                     }
                 }
             }
-            Text("المواد والشعب", style = MaterialTheme.typography.headlineSmall)
+            Text("المواد والشعب والجدول", style = MaterialTheme.typography.headlineSmall)
+            Text("المواد ومواعيدها يحدّدها المسؤول وتتحدّث تلقائيًا.", style = MaterialTheme.typography.bodySmall)
             if (courses.isEmpty()) Text("لا توجد مواد بعد.")
             else Text("اضغط على مادة لاختيارها:")
         }
@@ -158,7 +170,11 @@ fun CoursesScreen(vm: DoctorVM) {
                 colors = CardDefaults.cardColors(
                     containerColor = if (c.id == sel) MaterialTheme.colorScheme.primaryContainer
                     else MaterialTheme.colorScheme.surfaceVariant)) {
-                Text("${c.code} — ${c.name} / شعبة ${c.section}", Modifier.padding(16.dp))
+                Column(Modifier.padding(16.dp)) {
+                    Text("${c.code} — ${c.name} / شعبة ${c.section}")
+                    val sched = key(ver) { vm.scheduleText(c.id) }
+                    Text(if (sched.isBlank()) "لا مواعيد محدّدة بعد" else sched, style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
     }
@@ -176,6 +192,18 @@ fun LiveScreen(vm: DoctorVM, nfcInfo: () -> Pair<Boolean, String>) {
         Text("الحضور المباشر", style = MaterialTheme.typography.headlineSmall)
         Text(msg, color = if (ok) Green else Red)
         if (active == null) {
+            val ver by vm.version.collectAsState()
+            var now by remember { mutableStateOf<Pair<CourseSection, Int>?>(null) }
+            LaunchedEffect(ver, active) { now = vm.nowSlot() }
+            now?.let { (c, left) ->
+                Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("حسب الجدول الآن: ${c.code} ${c.name} / شعبة ${c.section}", style = MaterialTheme.typography.titleSmall)
+                        Button(onClick = { vm.selectedCourseId.value = c.id; vm.startSession(c, left) },
+                            enabled = ok, modifier = Modifier.fillMaxWidth()) { Text("بدء محاضرة الآن (حتى نهاية الموعد: $left دقيقة)") }
+                    }
+                }
+            }
             Text(course?.let { "المادة: ${it.name} / شعبة ${it.section}" } ?: "اختر مادة من تبويب «المواد»")
             F("مدة الجلسة (دقائق)", minutes) { minutes = it.filter(Char::isDigit) }
             Button(onClick = { vm.startSession(course!!, minutes.toIntOrNull()?.coerceIn(1, 240) ?: 15) },
@@ -255,15 +283,13 @@ fun ReportsScreen(vm: DoctorVM) {
             Button(onClick = { vm.loadReport() }) { Text("تحديث") }
             Button(onClick = { launcher.launch("attendance_${course?.code ?: "report"}.csv") }, enabled = rows.isNotEmpty()) { Text("تصدير CSV") }
         }
-        OutlinedButton(
-            onClick = {
-                scope.launch {
-                    val f = vm.buildAttendanceExport()
-                    if (f != null) shareFile(ctx, f, "إرسال الحضور للإدارة") else vm.message.value = "استورد كشف الإدارة أولًا"
-                }
-            },
-            enabled = linked, modifier = Modifier.fillMaxWidth()
-        ) { Text("إرسال الحضور للإدارة (ملف مشفّر)") }
+        val info by vm.syncInfo.collectAsState()
+        val syncing by vm.syncing.collectAsState()
+        Text("يُرفع الحضور للمسؤول تلقائيًا عند اتصال هاتفك بالإنترنت.", style = MaterialTheme.typography.bodySmall)
+        if (info.isNotBlank()) Text(info, style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(onClick = { vm.syncNow(manual = true) }, enabled = linked && !syncing, modifier = Modifier.fillMaxWidth()) {
+            Text(if (syncing) "جارٍ المزامنة…" else "رفع الحضور الآن")
+        }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             items(rows) {
                 val pct = if (it.total == 0) 0 else it.attended * 100 / it.total
