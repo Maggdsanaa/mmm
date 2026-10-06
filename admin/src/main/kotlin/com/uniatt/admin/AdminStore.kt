@@ -6,6 +6,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
+/** إعدادات ثابتة داخل التطبيق: قاعدة البيانات الوسيطة (مخفية عن المستخدم) تُضمَّن أيضًا في QR الدكاترة. */
+object AdminConfig {
+    const val DEFAULT_RELAY = "https://maggd-141d1-default-rtdb.firebaseio.com"
+}
+
 data class Course(val id: Long, val code: String, val name: String, val section: String)
 
 /** موعد أسبوعي لمادة/شعبة (يحدّده المسؤول): day 0=الأحد…6=السبت، والوقت بالدقائق. */
@@ -42,8 +47,12 @@ data class AdminState(
     val bindings: List<BindingRow> = emptyList(),
     val sessions: List<SessionRow> = emptyList(),
     val records: List<RecordRow> = emptyList(),
-    val relayUrl: String = ""         // عنوان قاعدة Firebase (مرة واحدة)، ويُضمَّن في QR الدكاترة
-)
+    val relayUrl: String = "",        // اختياري (للتوافق مع النسخ الاحتياطية)؛ الفارغ = AdminConfig.DEFAULT_RELAY
+    val majors: List<String> = emptyList(),    // التخصصات (من الإعدادات)
+    val sectionNames: List<String> = emptyList() // أسماء الشعب (من الإعدادات)
+) {
+    val effectiveRelay: String get() = relayUrl.ifBlank { AdminConfig.DEFAULT_RELAY }
+}
 
 private fun <T> JSONArray.mapObj(f: (JSONObject) -> T): List<T> = (0 until length()).map { f(getJSONObject(it)) }
 private fun longs(a: JSONArray): List<Long> = (0 until a.length()).map { a.getLong(it) }
@@ -51,6 +60,7 @@ private fun longs(a: JSONArray): List<Long> = (0 until a.length()).map { a.getLo
 object StateJson {
     fun toJson(s: AdminState): String = JSONObject()
         .put("v", 2).put("seq", s.seq).put("epoch", s.epoch).put("relay", s.relayUrl)
+        .put("majors", JSONArray(s.majors)).put("sectionNames", JSONArray(s.sectionNames))
         .put("courses", JSONArray(s.courses.map {
             JSONObject().put("id", it.id).put("code", it.code).put("name", it.name).put("section", it.section)
         }))
@@ -82,6 +92,8 @@ object StateJson {
         val j = JSONObject(text)
         return AdminState(
             seq = j.getLong("seq"), epoch = j.getLong("epoch"), relayUrl = j.optString("relay", ""),
+            majors = j.optJSONArray("majors")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
+            sectionNames = j.optJSONArray("sectionNames")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
             courses = j.getJSONArray("courses").mapObj { Course(it.getLong("id"), it.getString("code"), it.getString("name"), it.getString("section")) },
             slots = j.optJSONArray("slots")?.mapObj { Slot(it.getLong("id"), it.getLong("c"), it.getInt("d"), it.getInt("s"), it.getInt("e"), it.optString("r", "")) } ?: emptyList(),
             students = j.getJSONArray("students").mapObj {

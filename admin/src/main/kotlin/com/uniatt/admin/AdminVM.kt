@@ -36,7 +36,7 @@ class AdminVM(app: Application) : AndroidViewModel(app) {
     private fun fmtNow() = SimpleDateFormat("HH:mm", Locale.US).format(Date())
 
     private fun describe(r: AdminSync.Result): String = when {
-        r.noRelay -> "أدخل عنوان قاعدة Firebase أولًا"
+        r.noRelay -> "عنوان القاعدة غير صالح"
         r.offline -> "لا اتصال بالإنترنت — تتم المزامنة تلقائيًا عند توفّره"
         else -> "آخر مزامنة ${fmtNow()}: نُشر ${r.pushed} كشف، ${r.newRecords} تسجيل حضور جديد" +
             if (r.errors.isNotEmpty()) "\n⚠ " + r.errors.joinToString("\n⚠ ") else ""
@@ -58,40 +58,66 @@ class AdminVM(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun setRelay(input: String) = viewModelScope.launch {
-        val url = Pairing.normalizeUrl(input) ?: run { message.value = "العنوان يجب أن يبدأ بـ https:// (مثل https://xxxx-default-rtdb.firebaseio.com)"; return@launch }
-        val old = state.value.relayUrl
-        mutate { it.copy(relayUrl = url) }
-        if (old.isNotBlank() && old != url && state.value.doctors.isNotEmpty())
-            message.value = "تغيّر العنوان: على كل دكتور مسح QR جديد من تبويب الدكاترة."
-        syncNow(manual = old.isBlank() || old == url)
-    }
-
     /** نص رمز الـQR الذي يمسحه الدكتور مرة واحدة. */
     fun pairingText(doctorId: String): String? {
         val st = state.value
         val d = st.doctors.firstOrNull { it.doctorId == doctorId } ?: return null
-        val url = Pairing.normalizeUrl(st.relayUrl) ?: return null
+        val url = Pairing.normalizeUrl(st.effectiveRelay) ?: return null
         if (d.mailbox.isBlank()) return null
         return Pairing.format(Pairing.Info(url, d.mailbox, d.doctorId, d.code))
     }
 
     private fun courseKey(c: Course) = "${c.code}-${c.section}".lowercase()
 
-    /** مادة/شعبة جديدة؛ إن وُجدت (نفس الرمز والشعبة) يُحدَّث اسمها فقط. */
+    /** مادة جديدة بشعبة من قائمة الإعدادات؛ إن وُجدت (نفس الرمز والشعبة) يُحدَّث اسمها فقط. */
     fun addCourse(code: String, name: String, section: String) = viewModelScope.launch {
-        val dup = state.value.courses.firstOrNull { it.code.equals(code, true) && it.section.equals(section, true) }
-        if (dup != null) {
-            if (dup.name == name) { message.value = "المادة/الشعبة موجودة"; return@launch }
-            mutate { s -> s.copy(courses = s.courses.map { if (it.id == dup.id) it.copy(name = name) else it }) }
-            syncNow()
-            message.value = "تم تحديث اسم المادة إلى «$name»"
-            return@launch
-        }
-        mutate { s ->
-            val id = s.seq + 1
-            s.copy(seq = id, courses = s.courses + Course(id, code, name, section))
-        }
+        var err: AdminOps.Err? = null; var renamed = false
+        val before = state.value.courses.firstOrNull { it.code.equals(code.trim(), true) && it.section.equals(section, true) }
+        mutate { cur -> AdminOps.addCourse(cur, code, name, section).let { (ns, e) -> err = e; ns } }
+        if (err != null) { message.value = err!!.msg; return@launch }
+        renamed = before != null
+        syncNow()
+        if (renamed) message.value = "تم تحديث اسم المادة إلى «${name.trim()}»"
+    }
+
+    // ---- الإعدادات: التخصصات والشعب ----
+    private fun settingOp(f: (AdminState) -> Pair<AdminState, AdminOps.Err?>) = viewModelScope.launch {
+        var err: AdminOps.Err? = null
+        mutate { cur -> f(cur).let { (ns, e) -> err = e; ns } }
+        err?.let { message.value = it.msg }
+    }
+    fun addMajor(name: String) = settingOp { AdminOps.addMajor(it, name) }
+    fun removeMajor(name: String) = viewModelScope.launch { mutate { AdminOps.removeMajor(it, name) } }
+    fun addSectionName(name: String) = settingOp { AdminOps.addSectionName(it, name) }
+    fun removeSectionName(name: String) = viewModelScope.launch { mutate { AdminOps.removeSectionName(it, name) } }
+
+    // ---- الدكاترة: بالاسم فقط، والمواد من قائمة ----
+    fun saveDoctor(id: String?, name: String, courseIds: List<Long>) = viewModelScope.launch {
+        var saved: Doctor? = null
+        mutate { cur -> AdminOps.saveDoctor(cur, id, name, courseIds, { Codes.random() }, { Pairing.newMailbox() }).let { (ns, d) -> saved = d; ns } }
+        if (saved == null) { message.value = "اكتب اسم الدكتور"; return@launch }
+        syncNow()
+    }
+
+    // ---- الطلاب: بالاسم والتخصص والشعبة والمواد ----
+    fun addStudentForm(idInput: String, name: String, major: String, section: String, level: String, courseIds: List<Long>) = viewModelScope.launch {
+        if (name.isBlank()) { message.value = "اكتب اسم الطالب"; return@launch }
+        busy.value = true
+        val tags = state.value.students.map { it.tag }.toHashSet()
+        val code = Codes.newUnique(tags)
+        val key = withContext(Dispatchers.Default) { Hex.enc(Kdf.studentKey(code)) }
+        var err: AdminOps.Err? = null
+        mutate { cur -> AdminOps.addStudent(cur, idInput, name, major, section, level, courseIds, code, key).let { (ns, e) -> err = e; ns } }
+        busy.value = false
+        if (err != null) { message.value = err!!.msg; return@launch }
+        syncNow()
+        message.value = "تمت إضافة ${name.trim()}\nكوده: ${Codes.format(code)}\n(سلّمه الكود ليكتبه مرة واحدة في تطبيقه)"
+    }
+
+    fun editStudentForm(id: String, name: String, major: String, section: String, level: String, courseIds: List<Long>) = viewModelScope.launch {
+        var err: AdminOps.Err? = null
+        mutate { cur -> AdminOps.editStudent(cur, id, name, major, section, level, courseIds).let { (ns, e) -> err = e; ns } }
+        if (err != null) { message.value = err!!.msg; return@launch }
         syncNow()
     }
 
@@ -147,7 +173,7 @@ class AdminVM(app: Application) : AndroidViewModel(app) {
     fun deleteDoctor(id: String) = viewModelScope.launch {
         val cur = state.value
         val d0 = cur.doctors.firstOrNull { it.doctorId == id } ?: return@launch
-        val url = Pairing.normalizeUrl(cur.relayUrl)
+        val url = Pairing.normalizeUrl(cur.effectiveRelay)
         if (url != null && d0.mailbox.isNotBlank())
             withContext(Dispatchers.IO) { runCatching { Mailbox(Relay(url), d0.mailbox).wipe() } }
         mutate { s -> s.copy(doctors = s.doctors.filter { it.doctorId != id }) }
@@ -245,7 +271,7 @@ class AdminVM(app: Application) : AndroidViewModel(app) {
     fun resetDoctor(id: String) = viewModelScope.launch {
         val cur = state.value
         val d0 = cur.doctors.firstOrNull { it.doctorId == id } ?: return@launch
-        val url = Pairing.normalizeUrl(cur.relayUrl)
+        val url = Pairing.normalizeUrl(cur.effectiveRelay)
         if (url != null && d0.mailbox.isNotBlank()) {
             withContext(Dispatchers.IO) { runCatching { Mailbox(Relay(url), d0.mailbox).wipe() } }   // محاولة أفضل جهد لمحو القديم
         }

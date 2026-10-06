@@ -26,7 +26,7 @@ object AdminSync {
     suspend fun run(store: AdminStore): Result = mutex.withLock { withContext(Dispatchers.IO) { runLocked(store) } }
 
     private fun runLocked(store: AdminStore): Result {
-        val url = Pairing.normalizeUrl(store.load().relayUrl) ?: return Result(noRelay = true)
+        val url = Pairing.normalizeUrl(store.load().effectiveRelay) ?: return Result(noRelay = true)
         val relay = Relay(url)
         // كل دكتور يحتاج صندوق بريد؛ يُولَّد مرة واحدة ويثبت (إلا عند «كود جديد»).
         store.update { s -> s.copy(doctors = s.doctors.map { if (it.mailbox.isBlank()) it.copy(mailbox = Pairing.newMailbox()) else it }) }

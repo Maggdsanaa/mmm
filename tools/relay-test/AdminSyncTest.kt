@@ -90,9 +90,11 @@ fun main(args: Array<String>) = runBlocking {
     println("[5] حالات الاتصال")
     val offline = AdminSync.run(AdminStore(dir).also { it.update { s -> s.copy(relayUrl = "http://127.0.0.1:1") } })
     ok(offline.offline && offline.errors.isEmpty(), "لا اتصال => offline بلا استثناء ولا أخطاء مزعجة")
-    store.update { it.copy(relayUrl = "") }
-    ok(AdminSync.run(store).noRelay, "بلا عنوان قاعدة => noRelay")
     store.update { it.copy(relayUrl = url) }
+    ok(AdminState().effectiveRelay == "https://maggd-141d1-default-rtdb.firebaseio.com", "العنوان الافتراضي المخفي هو قاعدة maggd-141d1")
+    ok(AdminState(relayUrl = "https://other.example").effectiveRelay == "https://other.example", "العنوان المخزَّن (نسخ قديمة) يُحترم إن وُجد")
+    ok(StateJson.fromJson(StateJson.toJson(AdminState(majors = listOf("حاسب"), sectionNames = listOf("A")))).let { it.majors == listOf("حاسب") && it.sectionNames == listOf("A") }, "التخصصات والشعب تُحفظ وتُقرأ")
+    ok(StateJson.fromJson("""{"v":1,"seq":0,"epoch":0,"courses":[],"students":[],"doctors":[],"bindings":[],"sessions":[],"records":[]}""").majors.isEmpty(), "حالة قديمة بلا تخصصات/شعب تُقرأ بسلام")
 
     println("[6] إلغاء ربط دكتور (كود جديد + صندوق جديد)")
     val oldBox = box; val newCode = Codes.random(rnd); val newMbox = Pairing.newMailbox(rnd)
