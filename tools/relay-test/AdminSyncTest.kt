@@ -13,7 +13,7 @@ fun student(id: String, name: String, courseIds: List<Long>, rnd: SecureRandom):
 }
 
 fun main(args: Array<String>) = runBlocking {
-    val url = args[0]; val rnd = SecureRandom()
+    val url = args[0]; val deadUrl = args[1]; val rnd = SecureRandom()
     val dir = File.createTempFile("adm", "").also { it.delete(); it.mkdirs() }
     val store = AdminStore(dir)
     val dcode = Codes.random(rnd); val mbox = Pairing.newMailbox(rnd)
@@ -91,10 +91,31 @@ fun main(args: Array<String>) = runBlocking {
     val offline = AdminSync.run(AdminStore(dir).also { it.update { s -> s.copy(relayUrl = "http://127.0.0.1:1") } })
     ok(offline.offline && offline.errors.isEmpty(), "لا اتصال => offline بلا استثناء ولا أخطاء مزعجة")
     store.update { it.copy(relayUrl = url) }
-    ok(AdminState().effectiveRelay == "https://maggd-141d1-default-rtdb.firebaseio.com", "العنوان الافتراضي المخفي هو قاعدة maggd-141d1")
+    ok(AdminState().effectiveRelay == "https://maggd-141d1-default-rtdb.europe-west1.firebasedatabase.app", "العنوان الافتراضي المخفي هو قاعدة maggd-141d1")
     ok(AdminState(relayUrl = "https://other.example").effectiveRelay == "https://other.example", "العنوان المخزَّن (نسخ قديمة) يُحترم إن وُجد")
     ok(StateJson.fromJson(StateJson.toJson(AdminState(majors = listOf("حاسب"), sectionNames = listOf("A")))).let { it.majors == listOf("حاسب") && it.sectionNames == listOf("A") }, "التخصصات والشعب تُحفظ وتُقرأ")
     ok(StateJson.fromJson("""{"v":1,"seq":0,"epoch":0,"courses":[],"students":[],"doctors":[],"bindings":[],"sessions":[],"records":[]}""").majors.isEmpty(), "حالة قديمة بلا تخصصات/شعب تُقرأ بسلام")
+
+    println("[5b] عنوان خاطئ (404) => اكتشاف المنطقة تلقائيًا")
+    val dead = args[1]
+    RelayLocator.candidatesProvider = { _ -> listOf(deadUrl, url) }          // محاكاة: مناطق محتملة، واحدة ميتة وواحدة حيّة
+    ok(Relay(dead).probe() == 404 && Relay(url).probe() == 401, "الخادم الميت 404 والحيّ 401 (القاعدة موجودة والقواعد تحمي الجذر)")
+    ok(RelayLocator.find(dead) == url, "find: يتجاوز العنوان الميت ويجد الصحيح")
+    ok(RelayLocator.dbName("https://maggd-141d1-default-rtdb.europe-west1.firebasedatabase.app/") == "maggd-141d1-default-rtdb" &&
+        RelayLocator.dbName("https://maggd-141d1-default-rtdb.europe-west1.firebasedatabase.app") == "maggd-141d1-default-rtdb", "اسم القاعدة من أي صيغة عنوان")
+    store.update { it.copy(relayUrl = deadUrl) }
+    r = AdminSync.run(store)
+    ok(r.relayError == null && !r.offline && store.load().relayUrl == url, "المسؤول: عنوان ميت => يكتشف الصحيح ويحفظه (${store.load().relayUrl == url})")
+    ok(runCatching { Relay(dead).getString("m/x/y") }.exceptionOrNull().let { it is Relay.RelayException && it.code == 404 && it.friendly().contains("404") }, "خطأ 404 يُترجم لرسالة عربية مفهومة")
+    ok(Relay.RelayException(401, "x").friendly().contains("Rules"), "خطأ 401 يشرح نشر Rules")
+    RelayLocator.candidatesProvider = { _ -> listOf(deadUrl) }
+    store.update { it.copy(relayUrl = deadUrl) }
+    r = AdminSync.run(store)
+    ok(r.relayError != null && r.relayError!!.contains("لا توجد قاعدة") && store.load().relayUrl == dead, "لا قاعدة في أي منطقة => رسالة واضحة واحدة بلا تلف")
+    RelayLocator.candidatesProvider = { _ -> listOf(deadUrl, url) }
+    store.update { it.copy(relayUrl = url) }
+    AdminSync.run(store)
+
 
     println("[6] إلغاء ربط دكتور (كود جديد + صندوق جديد)")
     val oldBox = box; val newCode = Codes.random(rnd); val newMbox = Pairing.newMailbox(rnd)

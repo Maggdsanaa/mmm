@@ -58,6 +58,23 @@ fun main(args: Array<String>) {
     box.wipe()
     ok(box.fetchRoster() == null && box.rosterEpoch() == null && box.fetchAttendance() == null, "wipe يمحو كل شيء (إلغاء ربط الدكتور)")
 
+    println("[4] اكتشاف عنوان القاعدة الصحيح (خطأ 404 = منطقة/عنوان خاطئ)")
+    val dead = args[1]
+    ok(Relay(dead).probe() == 404, "عنوان خاطئ => probe يعيد 404")
+    ok(Relay(url).probe() == 401, "قاعدة موجودة والقواعد تمنع الجذر => 401 (أي موجودة)")
+    ok(runCatching { Relay(dead).getString("m/x/y") }.exceptionOrNull().let { it is Relay.RelayException && it.code == 404 }, "قراءة من عنوان خاطئ => RelayException(404)")
+    ok(Relay.RelayException(404, "x").friendly().contains("عنوانها غير صحيح") && Relay.RelayException(401, "x").friendly().contains("Rules"), "رسائل عربية مفهومة لـ404 و401")
+    ok(RelayLocator.dbName("https://maggd-141d1-default-rtdb.europe-west1.firebasedatabase.app/") == "maggd-141d1-default-rtdb" &&
+        RelayLocator.dbName("https://maggd-141d1-default-rtdb.firebaseio.com") == "maggd-141d1-default-rtdb", "استخراج اسم القاعدة من العنوانين")
+    val real = RelayLocator.candidatesProvider
+    RelayLocator.candidatesProvider = { listOf(dead, url) }
+    ok(RelayLocator.find(dead) == url, "يبدأ بالعنوان الخاطئ ويجد الصحيح تلقائيًا")
+    ok(RelayLocator.find(url) == url, "العنوان الصحيح يبقى كما هو")
+    RelayLocator.candidatesProvider = { listOf(dead) }
+    ok(RelayLocator.find(dead) == null, "لا قاعدة بهذا الاسم في أي منطقة => null")
+    RelayLocator.candidatesProvider = real
+    ok(real("db").any { it == "https://db.europe-west1.firebasedatabase.app" } && real("db").any { it == "https://db.firebaseio.com" }, "المرشحون الحقيقيون يشملون أوروبا وأمريكا")
+
     println("\nالنتيجة: نجح $passed، فشل $failed")
     if (failed > 0) System.exit(1)
 }

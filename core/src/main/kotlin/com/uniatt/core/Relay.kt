@@ -50,7 +50,16 @@ object Pairing {
 class Relay(baseUrl: String, private val timeoutMs: Int = 20_000) {
     private val base = baseUrl.trim().trimEnd('/')
 
-    class RelayException(msg: String) : Exception(msg)
+    /** [code] = رمز HTTP إن وُجد (404 = عنوان القاعدة خاطئ، 401/403 = القواعد Rules تمنع الوصول). */
+    class RelayException(val code: Int, msg: String) : Exception(msg) {
+        /** رسالة عربية مفهومة للمستخدم. */
+        fun friendly(): String = when (code) {
+            404 -> "تعذّر العثور على قاعدة البيانات (404): عنوانها غير صحيح — غالبًا المنطقة. راجع تبويب Data في Firebase."
+            401, 403 -> "قواعد Firebase تمنع الوصول ($code): افتح Realtime Database ← Rules والصق القواعد الموجودة في README ثم Publish."
+            in 500..599 -> "خطأ مؤقت في خادم Firebase ($code) — ستُعاد المحاولة تلقائيًا."
+            else -> "خطأ في الاتصال بالقاعدة (HTTP $code)."
+        }
+    }
 
     private fun open(path: String, method: String, query: String = ""): HttpURLConnection {
         val c = URL("$base/$path.json$query").openConnection() as HttpURLConnection
@@ -67,8 +76,14 @@ class Relay(baseUrl: String, private val timeoutMs: Int = 20_000) {
         val text = stream?.use { s ->
             val out = ByteArrayOutputStream(); s.copyTo(out); String(out.toByteArray(), Charsets.UTF_8)
         } ?: ""
-        if (code !in 200..299) throw RelayException("HTTP $code")
+        if (code !in 200..299) throw RelayException(code, "HTTP $code")
         return text
+    }
+
+    /** رمز HTTP لقراءة الجذر (بلا استثناء إن كان خطأ HTTP؛ IOException فقط عند انقطاع الاتصال). */
+    fun probe(): Int {
+        val c = open("", "GET", "?shallow=true")
+        try { return c.responseCode } finally { c.disconnect() }
     }
 
     /** يعيد النص المخزَّن أو null إن لم يوجد. */
@@ -99,6 +114,35 @@ class Relay(baseUrl: String, private val timeoutMs: Int = 20_000) {
 
     fun putBytes(path: String, bytes: ByteArray) = putString(path, Base64.getEncoder().encodeToString(bytes))
     fun getBytes(path: String): ByteArray? = getString(path)?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }
+}
+
+/**
+ * اكتشاف عنوان القاعدة الصحيح: قواعد Firebase في مناطق مختلفة لها عناوين مختلفة
+ * (us-central: ‎*.firebaseio.com، وغيرها: ‎*.REGION.firebasedatabase.app). 404 = العنوان خاطئ، أما 200/401 فالقاعدة موجودة.
+ */
+object RelayLocator {
+    /** قابل للاستبدال في الاختبارات. */
+    var candidatesProvider: (String) -> List<String> = { db -> listOf(
+        "https://$db.firebaseio.com",
+        "https://$db.europe-west1.firebasedatabase.app",
+        "https://$db.asia-southeast1.firebasedatabase.app",
+        "https://$db.us-central1.firebasedatabase.app"
+    ) }
+
+    /** اسم القاعدة (مثل maggd-141d1-default-rtdb) من أي عنوان لها. */
+    fun dbName(url: String): String? =
+        url.trim().removePrefix("https://").removePrefix("http://").substringBefore('/').substringBefore(':').substringBefore('.').ifBlank { null }
+
+    /** يعيد أول عنوان موجود (يبدأ بـ [current])، أو null إن لم توجد قاعدة بهذا الاسم. يرمي IOException عند انقطاع الاتصال. */
+    fun find(current: String): String? {
+        val name = dbName(current) ?: return null
+        val cands = (listOf(current.trim().trimEnd('/')) + candidatesProvider(name)).distinct()
+        for (u in cands) {
+            val code = Relay(u, timeoutMs = 10_000).probe()
+            if (code != 404) return u
+        }
+        return null
+    }
 }
 
 /** صندوق بريد دكتور واحد على الترحيل: الكشف (من المسؤول) والحضور (من الدكتور). */

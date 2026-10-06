@@ -8,7 +8,7 @@ import java.io.File
 
 /** إعدادات ثابتة داخل التطبيق: قاعدة البيانات الوسيطة (مخفية عن المستخدم) تُضمَّن أيضًا في QR الدكاترة. */
 object AdminConfig {
-    const val DEFAULT_RELAY = "https://maggd-141d1-default-rtdb.firebaseio.com"
+    const val DEFAULT_RELAY = "https://maggd-141d1-default-rtdb.europe-west1.firebasedatabase.app"
 }
 
 data class Course(val id: Long, val code: String, val name: String, val section: String)

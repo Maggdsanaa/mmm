@@ -17,16 +17,31 @@ import java.security.MessageDigest
  */
 object AdminSync {
     private val mutex = Mutex()
+    @Volatile private var verifiedUrl: String? = null     // آخر عنوان ثبت وجوده في هذه العملية
 
     data class Result(
         val noRelay: Boolean = false, val offline: Boolean = false,
-        val pushed: Int = 0, val newRecords: Int = 0, val errors: List<String> = emptyList()
+        val pushed: Int = 0, val newRecords: Int = 0, val errors: List<String> = emptyList(),
+        val relayError: String? = null            // مشكلة في القاعدة نفسها (عنوان/Rules) لا في دكتور بعينه
     )
 
     suspend fun run(store: AdminStore): Result = mutex.withLock { withContext(Dispatchers.IO) { runLocked(store) } }
 
     private fun runLocked(store: AdminStore): Result {
-        val url = Pairing.normalizeUrl(store.load().effectiveRelay) ?: return Result(noRelay = true)
+        var url = Pairing.normalizeUrl(store.load().effectiveRelay) ?: return Result(noRelay = true)
+        // تحقّق من العنوان: إن كان 404 نبحث تلقائيًا عن المنطقة الصحيحة ونحفظها (ويُضمَّن في QR الدكاترة).
+        if (verifiedUrl != url) {
+            try {
+                if (Relay(url, 10_000).probe() == 404) {
+                    val found = RelayLocator.find(url)
+                        ?: return Result(relayError = "لا توجد قاعدة بيانات بهذا الاسم. تأكد أن Realtime Database أُنشئت في مشروع Firebase.")
+                    if (found != url) { store.update { it.copy(relayUrl = found) }; url = found }
+                }
+                verifiedUrl = url
+            } catch (e: IOException) {
+                return Result(offline = true)
+            }
+        }
         val relay = Relay(url)
         // كل دكتور يحتاج صندوق بريد؛ يُولَّد مرة واحدة ويثبت (إلا عند «كود جديد»).
         store.update { s -> s.copy(doctors = s.doctors.map { if (it.mailbox.isBlank()) it.copy(mailbox = Pairing.newMailbox()) else it }) }
@@ -40,8 +55,13 @@ object AdminSync {
                 newRecs += n
             } catch (e: IOException) {
                 return Result(offline = true, pushed = pushed, newRecords = newRecs, errors = errors)  // لا اتصال: توقّف بهدوء
+            } catch (e: Relay.RelayException) {
+                if (e.code == 404) verifiedUrl = null                 // أعد الاكتشاف في المرة القادمة
+                // مشكلة في القاعدة نفسها: تتوقف المزامنة برسالة واحدة واضحة بدل خطأ لكل دكتور
+                return Result(pushed = pushed, newRecords = newRecs, errors = errors, relayError = e.friendly())
             } catch (e: Exception) {
-                errors.add("$id: ${e.message ?: e.javaClass.simpleName}")
+                val nm = store.load().doctors.firstOrNull { it.doctorId == id }?.name ?: id
+                errors.add("$nm: ${e.message ?: e.javaClass.simpleName}")
             }
         }
         return Result(pushed = pushed, newRecords = newRecs, errors = errors)

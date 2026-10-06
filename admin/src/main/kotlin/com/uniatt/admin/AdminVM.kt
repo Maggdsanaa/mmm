@@ -36,6 +36,7 @@ class AdminVM(app: Application) : AndroidViewModel(app) {
     private fun fmtNow() = SimpleDateFormat("HH:mm", Locale.US).format(Date())
 
     private fun describe(r: AdminSync.Result): String = when {
+        r.relayError != null -> "⚠ ${r.relayError}"
         r.noRelay -> "عنوان القاعدة غير صالح"
         r.offline -> "لا اتصال بالإنترنت — تتم المزامنة تلقائيًا عند توفّره"
         else -> "آخر مزامنة ${fmtNow()}: نُشر ${r.pushed} كشف، ${r.newRecords} تسجيل حضور جديد" +

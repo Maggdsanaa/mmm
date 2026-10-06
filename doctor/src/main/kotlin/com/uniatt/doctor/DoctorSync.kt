@@ -26,7 +26,7 @@ object DoctorSync {
 
     suspend fun run(ctx: Context): Result = mutex.withLock { withContext(Dispatchers.IO) { runLocked(ctx.applicationContext) } }
 
-    private suspend fun runLocked(ctx: Context): Result {
+    private suspend fun runLocked(ctx: Context, retried: Boolean = false): Result {
         val prefs = ctx.getSharedPreferences("doctor", 0)
         val mbox = prefs.getString("mbox", null)
         val relayUrl = prefs.getString("relay", null)
@@ -82,6 +82,16 @@ object DoctorSync {
             return Result(waitingAdmin = waiting, rosterUpdated = updated, resetCount = resets, uploaded = uploaded)
         } catch (e: IOException) {
             return Result(offline = true, rosterUpdated = updated, resetCount = resets, uploaded = uploaded)
+        } catch (e: Relay.RelayException) {
+            // 404 = عنوان القاعدة في الـQR قديم/خاطئ (مثلًا المنطقة): نبحث عن الصحيح ونعيد المحاولة مرة واحدة
+            if (e.code == 404 && !retried) {
+                val found = try { RelayLocator.find(relayUrl) } catch (_: IOException) { return Result(offline = true) }
+                if (found != null && found != relayUrl) {
+                    prefs.edit().putString("relay", found).apply()
+                    return runLocked(ctx, retried = true)
+                }
+            }
+            return Result(error = e.friendly(), rosterUpdated = updated, resetCount = resets, uploaded = uploaded)
         } catch (e: Exception) {
             return Result(error = e.message ?: e.javaClass.simpleName, rosterUpdated = updated, resetCount = resets, uploaded = uploaded)
         }

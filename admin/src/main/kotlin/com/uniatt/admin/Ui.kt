@@ -295,7 +295,7 @@ fun DoctorsTab(vm: AdminVM) {
     }
     qrFor?.let { id ->
         val d = st.doctors.firstOrNull { it.doctorId == id }
-        val payload = remember(id, d?.mailbox, d?.code) { vm.pairingText(id) }
+        val payload = remember(id, st.relayUrl, d?.mailbox, d?.code) { vm.pairingText(id) }
         if (d != null && payload != null) AlertDialog(
             onDismissRequest = { qrFor = null },
             confirmButton = { TextButton(onClick = { qrFor = null }) { Text("تم") } },
