@@ -29,6 +29,8 @@ class DoctorVM(app: Application) : AndroidViewModel(app) {
     val readerOn = MutableStateFlow(false)
     val contacts = MutableStateFlow(0)
     val testMode = MutableStateFlow(false)
+    /** وضع توافق: يقرأ كل أنواع NFC (A/B/F/V) بدل A فقط، لأجهزة تتصرف بشكل مختلف. */
+    val compat = MutableStateFlow(false)
     fun onContact() { contacts.update { it + 1 } }
     val historySession = MutableStateFlow<String?>(null)
     val report = MutableStateFlow<List<ReportRow>>(emptyList())

@@ -151,6 +151,16 @@ fun Home(tick: Int, profile: StudentProfile?) {
                 if (!ok) Button(onClick = { ctx.startActivity(Intent(Settings.ACTION_NFC_SETTINGS)) }) { Text("فتح إعدادات NFC") }
                 Text("أبقِ التطبيق مفتوحًا والشاشة مضاءة، وقرّب ظهر الهاتف من هاتف الدكتور حتى تشعر بالاهتزاز.")
                 if (profile == null) Text(WAITING, style = MaterialTheme.typography.bodySmall)
+                Text("جهازك: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} — Android ${android.os.Build.VERSION.RELEASE}", style = MaterialTheme.typography.bodySmall)
+                var tips by remember { mutableStateOf(false) }
+                TextButton(onClick = { tips = !tips }) { Text(if (tips) "إخفاء إعدادات الهاتف" else "التقريب لا يعمل؟ افحص إعدادات هاتفك") }
+                if (tips) Text(
+                    "• افتح إعدادات NFC وتأكد من تفعيل «محاكاة البطاقة / Card emulation / الدفع باللمس» بوضع HCE (وليس SIM أو eSE) — في هواوي/هونر/شاومي/أوبو/ريلمي/فيفو يوجد خيار «Card emulation mode» أو «HCE Wallet».\n" +
+                    "• في سامسونج: الإعدادات ← الاتصالات ← NFC والدفع بلا تلامس، وفعّل NFC.\n" +
+                    "• أوقف «طلب فتح القفل لاستخدام NFC» إن وُجد، وأبقِ الشاشة مضاءة والتطبيق مفتوحًا.\n" +
+                    "• قرّب ظهر هاتفك من ظهر هاتف الدكتور وحرّكه ببطء حتى تجد موضع الهوائي (غالبًا منتصف الظهر أو أعلاه)، وانزع الجراب إن كان سميكًا أو فيه معدن.",
+                    style = MaterialTheme.typography.bodySmall
+                )
                 Text(
                     contact?.let { "آخر اتصال من هاتف الدكتور: قبل ${((nowMs - it.time) / 1000).coerceAtLeast(0)} ثانية — ${it.step}" }
                         ?: "لم يصل أي اتصال من هاتف دكتور بعد (إن قرّبت ولم يظهر شيء هنا فالهاتفان لم يتلامسا من منطقة الهوائي)",

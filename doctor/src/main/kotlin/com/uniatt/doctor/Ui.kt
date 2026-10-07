@@ -191,6 +191,7 @@ fun LiveScreen(vm: DoctorVM, nfcInfo: () -> Pair<Boolean, String>) {
     val readerOn by vm.readerOn.collectAsState()
     val contacts by vm.contacts.collectAsState()
     val test by vm.testMode.collectAsState()
+    val compat by vm.compat.collectAsState()
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("الحضور المباشر", style = MaterialTheme.typography.headlineSmall)
         Text(msg, color = if (ok) Green else Red)
@@ -199,6 +200,14 @@ fun LiveScreen(vm: DoctorVM, nfcInfo: () -> Pair<Boolean, String>) {
                 " — أجهزة اكتُشفت: $contacts",
             style = MaterialTheme.typography.bodySmall, color = if (readerOn) Green else Color.Unspecified
         )
+        Text("جهازك: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} — Android ${android.os.Build.VERSION.RELEASE}", style = MaterialTheme.typography.bodySmall)
+        if (readerOn && contacts == 0)
+            Text("لم يُكتشف أي جهاز بعد. جرّب تقريب بطاقة NFC عادية (بطاقة مترو/فندق/بنك) من ظهر هاتفك: إن زاد العدّاد فقارئ هاتفك سليم والمشكلة في هاتف الطالب، وإن لم يزد ففعّل «Reader mode / قراءة وكتابة» من إعدادات NFC في هاتفك (انظر README).",
+                style = MaterialTheme.typography.bodySmall, color = Color(0xFFB26A00))
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Switch(checked = compat, onCheckedChange = { vm.compat.value = it })
+            Text("وضع التوافق (قراءة كل أنواع NFC)", style = MaterialTheme.typography.bodySmall)
+        }
         if (active == null) {
             val ver by vm.version.collectAsState()
             var now by remember { mutableStateOf<Pair<CourseSection, Int>?>(null) }

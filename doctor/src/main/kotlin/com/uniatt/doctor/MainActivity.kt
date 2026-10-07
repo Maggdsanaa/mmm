@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 try {
-                    combine(vm.active, vm.testMode) { a, t -> a != null || t }.collect { if (it) enable() else disable() }
+                    combine(vm.active, vm.testMode, vm.compat) { a, t, c -> (a != null || t) to c }.collect { (on, c) -> if (on) enable(c) else disable() }
                 } finally { disable() }
             }
         }
@@ -71,12 +71,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() { super.onResume(); tick++ }
 
-    private fun enable() {
+    private fun enable(compat: Boolean = false) {
         try {
             nfc?.enableReaderMode(
                 this, reader,
                 // NFC-A فقط (ما تُحاكيه هواتف HCE) + بلا فحص NDEF؛ وفحص حضور أبطأ ليبقى الاتصال مستقرًا
-                NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
+                (if (compat) NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or NfcAdapter.FLAG_READER_NFC_F or NfcAdapter.FLAG_READER_NFC_V
+                 else NfcAdapter.FLAG_READER_NFC_A) or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
                 Bundle().apply { putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250) }
             )
             vm.readerOn.value = true
