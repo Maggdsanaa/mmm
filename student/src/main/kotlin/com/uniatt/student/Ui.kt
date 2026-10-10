@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.nfc.NfcAdapter
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -20,8 +22,11 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.uniatt.core.Codes
 import com.uniatt.core.Kdf
+import com.uniatt.core.QrProtocol
 import com.uniatt.core.Status
 import com.uniatt.core.StudentProfile
 import com.uniatt.core.fmtTime
@@ -141,6 +146,43 @@ fun Home(tick: Int, profile: StudentProfile?) {
     val (ok, msg) = remember(tick) { nfcState(ctx) }
     val last by ResultBus.last.collectAsState()
     val contact by ResultBus.contact.collectAsState()
+    val store = remember { StudentStore(ctx) }
+    var auto by remember { mutableStateOf(store.autoBle && blePermissionsGranted(ctx)) }
+    var autoMsg by remember { mutableStateOf<String?>(null) }
+    val bleState by ResultBus.ble.collectAsState()
+    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
+        if (blePermissionsGranted(ctx)) { store.autoBle = true; auto = true; autoMsg = null; AutoAttendService.start(ctx) }
+        else { store.autoBle = false; auto = false; autoMsg = "لم تُمنح صلاحية البلوتوث — اسمح بها من إعدادات التطبيق ليعمل التسجيل التلقائي." }
+    }
+    var qrReply by remember { mutableStateOf<String?>(null) }
+    var qrError by remember { mutableStateOf<String?>(null) }
+    val qrScope = rememberCoroutineScope()
+    val challengeScanner = rememberLauncherForActivityResult(ScanContract()) { res ->
+        val t = res.contents
+        if (t != null) {
+            val req = QrProtocol.parseChallenge(t)
+            if (req == null) {
+                qrError = "هذا ليس رمز الدكتور. اطلب منه تفعيل «بديل NFC: تسجيل بالـQR» ثم امسح الرمز الذي يظهر في هاتفه."
+            } else qrScope.launch {
+                val text = withContext(Dispatchers.Default) { runCatching { StudentQr.reply(ctx, req) }.getOrNull() }
+                if (text == null) qrError = "تعذّر تجهيز الإجابة على هذا الجهاز" else { qrError = null; qrReply = text }
+            }
+        }
+    }
+    qrReply?.let { txt ->
+        AlertDialog(
+            onDismissRequest = { qrReply = null },
+            confirmButton = { TextButton(onClick = { qrReply = null }) { Text("تم") } },
+            title = { Text("اعرض هذا الرمز للدكتور") },
+            text = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    QrCode(txt, Modifier.size(300.dp))
+                    Text("وجّه شاشتك نحو كاميرا هاتف الدكتور وأبقِها ثابتة. الرمز صالح لدقيقة واحدة؛ إن انتهت امسح رمز الدكتور من جديد.",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        )
+    }
     var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { nowMs = System.currentTimeMillis(); delay(1000) } }
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -151,6 +193,25 @@ fun Home(tick: Int, profile: StudentProfile?) {
                 if (!ok) Button(onClick = { ctx.startActivity(Intent(Settings.ACTION_NFC_SETTINGS)) }) { Text("فتح إعدادات NFC") }
                 Text("أبقِ التطبيق مفتوحًا والشاشة مضاءة، وقرّب ظهر الهاتف من هاتف الدكتور حتى تشعر بالاهتزاز.")
                 if (profile == null) Text(WAITING, style = MaterialTheme.typography.bodySmall)
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Switch(checked = auto, onCheckedChange = { on ->
+                        if (on) permLauncher.launch(blePermissions())
+                        else { store.autoBle = false; auto = false; AutoAttendService.stop(ctx) }
+                    })
+                    Text("التسجيل التلقائي بالبلوتوث (بلا أي لمسة)", style = MaterialTheme.typography.titleSmall)
+                }
+                Text(
+                    "يعمل في الخلفية بإشعار دائم: فور بدء الدكتور للجلسة يتصل هاتفك به ويُسجَّل حضورك تلقائيًا. أبقِ البلوتوث مفعّلًا. قد يستغرق ذلك حتى نصف دقيقة في القاعات الكبيرة." +
+                        (if (auto && bleState.isNotBlank()) "\nالحالة: $bleState" else ""),
+                    style = MaterialTheme.typography.bodySmall
+                )
+                autoMsg?.let { Text(it, color = Red, style = MaterialTheme.typography.bodySmall) }
+                Button(onClick = {
+                    qrError = null
+                    challengeScanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                        .setPrompt("امسح الرمز المعروض على هاتف الدكتور").setBeepEnabled(false).setOrientationLocked(false))
+                }, modifier = Modifier.fillMaxWidth()) { Text("تسجيل بالـQR (إن لم يعمل NFC)") }
+                qrError?.let { Text(it, color = Red, style = MaterialTheme.typography.bodySmall) }
                 Text("جهازك: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} — Android ${android.os.Build.VERSION.RELEASE}", style = MaterialTheme.typography.bodySmall)
                 var tips by remember { mutableStateOf(false) }
                 TextButton(onClick = { tips = !tips }) { Text(if (tips) "إخفاء إعدادات الهاتف" else "التقريب لا يعمل؟ افحص إعدادات هاتفك") }

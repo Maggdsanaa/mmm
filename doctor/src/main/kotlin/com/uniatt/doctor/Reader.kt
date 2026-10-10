@@ -25,7 +25,10 @@ class AttendanceReader(
     private val session: () -> ActiveSession?
 ) : NfcAdapter.ReaderCallback {
     /** يُضبط من MainActivity: نص مواعيد المادة (من جدول المسؤول) ليصل للطالب مع بياناته. */
-    @Volatile var scheduleOf: (Long) -> String = { "" }
+    val evaluator = AttendanceEvaluator(dao)
+    var scheduleOf: (Long) -> String
+        get() = evaluator.scheduleOf
+        set(v) { evaluator.scheduleOf = v }
 
     /** وضع «اختبار NFC»: يفحص الاتصال بهاتف الطالب بلا جلسة ولا تسجيل حضور. */
     @Volatile var testMode: () -> Boolean = { false }
@@ -76,22 +79,12 @@ class AttendanceReader(
             }
             val sess = s ?: return
 
-            val out = runBlocking { evaluate(sess, reply, req) }
+            val out = runBlocking { evaluator.evaluate(sess, reply, req) }
             try { iso.transceive(Protocol.buildResultCommand(out.status)) } catch (_: Exception) {}
             if (Status.ok(out.status) && out.profile != null) {
                 try { Protocol.buildProfileCommands(out.profile.encode()).forEach { iso.transceive(it) } } catch (_: Exception) {}
             }
-            val name = out.student?.name ?: ""
-            onEvent(ScanEvent(out.status == Status.OK, when (out.status) {
-                Status.OK -> "✓ تم تسجيل حضور $name"
-                Status.DUPLICATE -> "⚠ $name — سُجّل حضوره مسبقًا"
-                Status.NOT_ENROLLED -> "✗ الطالب غير مسجل في هذه المادة ($name)"
-                Status.UNKNOWN_STUDENT -> "✗ كود غير موجود في الكشف (${reply.tag}) — اضغط «مزامنة الآن» في تبويب المواد"
-                Status.BAD_PROOF -> "✗ كود الطالب غير صحيح"
-                Status.KEY_MISMATCH -> "✗ $name: الكود مرتبط بجهاز آخر — يحتاج كودًا جديدًا من الإدارة"
-                Status.BAD_SIGNATURE -> "✗ فشل التحقق من جهاز الطالب"
-                else -> "✗ انتهت مدة الجلسة"
-            }))
+            onEvent(ScanEvent(out.status == Status.OK, AttendanceEvaluator.describe(out, reply.tag)))
             cooldownUntil = System.currentTimeMillis() + 2000
         } catch (e: Exception) {
             onEvent(ScanEvent(false,
@@ -99,8 +92,14 @@ class AttendanceReader(
                 else "خطأ في القراءة (${e.javaClass.simpleName}) — أعد التقريب وأبقِ الهاتفين ثابتين"))
         } finally { try { iso.close() } catch (_: Exception) {} }
     }
+}
 
-    private suspend fun evaluate(s: ActiveSession, r: Protocol.AttendReply, req: Protocol.AttendRequest): Outcome {
+/** التحقق من إجابة طالب وتسجيل حضوره (مشترك بين NFC وبديل QR). */
+class AttendanceEvaluator(private val dao: AttDao) {
+    /** نص مواعيد المادة (من جدول المسؤول) ليصل للطالب مع بياناته. */
+    @Volatile var scheduleOf: (Long) -> String = { "" }
+
+    suspend fun evaluate(s: ActiveSession, r: Protocol.AttendReply, req: Protocol.AttendRequest): Outcome {
         val now = System.currentTimeMillis()
         if (now > s.endsAt) return Outcome(Status.EXPIRED, null)
         val st = dao.studentByTag(r.tag) ?: return Outcome(Status.UNKNOWN_STUDENT, null)
@@ -129,5 +128,21 @@ class AttendanceReader(
         }
         val profile = StudentProfile(st.studentId, st.name, st.faculty, st.major, st.level, st.section, courses)
         return Outcome(status, st, profile)
+    }
+
+    companion object {
+        fun describe(out: Outcome, tag: String): String {
+            val name = out.student?.name ?: ""
+            return when (out.status) {
+                Status.OK -> "✓ تم تسجيل حضور $name"
+                Status.DUPLICATE -> "⚠ $name — سُجّل حضوره مسبقًا"
+                Status.NOT_ENROLLED -> "✗ الطالب غير مسجل في هذه المادة ($name)"
+                Status.UNKNOWN_STUDENT -> "✗ كود غير موجود في الكشف ($tag) — اضغط «مزامنة الآن» في تبويب المواد"
+                Status.BAD_PROOF -> "✗ كود الطالب غير صحيح"
+                Status.KEY_MISMATCH -> "✗ $name: الكود مرتبط بجهاز آخر — يحتاج كودًا جديدًا من الإدارة"
+                Status.BAD_SIGNATURE -> "✗ فشل التحقق من جهاز الطالب"
+                else -> "✗ انتهت مدة الجلسة"
+            }
+        }
     }
 }

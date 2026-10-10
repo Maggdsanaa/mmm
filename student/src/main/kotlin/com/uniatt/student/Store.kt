@@ -17,12 +17,18 @@ data class Contact(val time: Long, val step: String)
 
 object ResultBus {
     val contact = MutableStateFlow<Contact?>(null)
+    val ble = MutableStateFlow("")             // حالة التسجيل التلقائي بالبلوتوث
     val last = MutableStateFlow<HistoryItem?>(null)
     val profileVersion = MutableStateFlow(0)      // يزداد عند وصول بيانات الطالب من هاتف دكتور
 }
 
 class StudentStore(ctx: Context) {
     private val sp = ctx.applicationContext.getSharedPreferences("student", Context.MODE_PRIVATE)
+
+    /** هل التسجيل التلقائي بالبلوتوث مفعّل (يعمل في الخلفية بإشعار دائم). */
+    var autoBle: Boolean
+        get() = sp.getBoolean("auto_ble", false)
+        set(v) { sp.edit().putBoolean("auto_ble", v).apply() }
 
     // ---- الكود (يُدخل مرة واحدة) ----
     fun credentials(): Credentials? {

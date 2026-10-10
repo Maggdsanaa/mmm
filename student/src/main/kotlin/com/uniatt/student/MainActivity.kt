@@ -22,6 +22,10 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         tick++
+        // إن كان التسجيل التلقائي مفعّلًا نتأكد أن الخدمة شغّالة (مثلًا بعد إعادة تشغيل الهاتف)
+        StudentStore(this).let { st ->
+            if (st.autoBle && st.credentials() != null && blePermissionsGranted(this)) AutoAttendService.start(this)
+        }
         // يجعل هذا التطبيق هو الخدمة المفضلة أثناء ظهوره (أكثر موثوقية)
         NfcAdapter.getDefaultAdapter(this)?.let {
             try {

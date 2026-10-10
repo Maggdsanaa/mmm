@@ -31,7 +31,45 @@ class DoctorVM(app: Application) : AndroidViewModel(app) {
     val testMode = MutableStateFlow(false)
     /** وضع توافق: يقرأ كل أنواع NFC (A/B/F/V) بدل A فقط، لأجهزة تتصرف بشكل مختلف. */
     val compat = MutableStateFlow(false)
+    val qrOn = MutableStateFlow(false)
+    /** الحضور التلقائي بالبلوتوث أثناء الجلسة. */
+    val bleOn = MutableStateFlow(true)
+    val bleState = MutableStateFlow("")
+    val bleClients = MutableStateFlow(0)
     fun onContact() { contacts.update { it + 1 } }
+
+    // ---- بديل NFC: QR بتحدٍّ وإجابة ----
+    val evaluator = AttendanceEvaluator(dao).also { it.scheduleOf = { id -> scheduleText(id, withRoom = false) } }
+    private val challenges = QrChallenges()
+    /** نص رمز التحدّي المعروض الآن (يتغيّر كل 10 ثوانٍ) أو null إذا كان وضع QR مغلقًا. */
+    val qrChallenge = MutableStateFlow<String?>(null)
+    private var qrJob: kotlinx.coroutines.Job? = null
+
+    fun setQrMode(on: Boolean) {
+        qrJob?.cancel(); qrJob = null
+        if (!on) { qrChallenge.value = null; challenges.clear(); return }
+        qrJob = viewModelScope.launch {
+            while (true) {
+                val s = active.value ?: break
+                qrChallenge.value = QrProtocol.challengeText(challenges.issue(s.sessionId))
+                kotlinx.coroutines.delay(10_000)
+            }
+            qrChallenge.value = null
+        }
+    }
+
+    /** نتيجة مسح رمز إجابة طالب. */
+    fun onQrReply(text: String) {
+        viewModelScope.launch {
+            val s = active.value ?: run { onScan(ScanEvent(false, "لا توجد جلسة نشطة")); return@launch }
+            val pr = QrProtocol.parseReply(text)
+            if (pr == null) { onScan(ScanEvent(false, "الرمز الممسوح ليس إجابة صالحة من تطبيق الطالب")); return@launch }
+            val req = challenges.find(pr.nonce)
+            if (req == null) { onScan(ScanEvent(false, "الإجابة قديمة أو لم تصدر من شاشتك — اطلب من الطالب مسح رمز الدكتور الحالي من جديد")); return@launch }
+            val out = withContext(Dispatchers.IO) { evaluator.evaluate(s, pr.reply, req) }
+            onScan(ScanEvent(out.status == Status.OK, AttendanceEvaluator.describe(out, pr.reply.tag)))
+        }
+    }
     val historySession = MutableStateFlow<String?>(null)
     val report = MutableStateFlow<List<ReportRow>>(emptyList())
 
@@ -168,6 +206,7 @@ class DoctorVM(app: Application) : AndroidViewModel(app) {
     }
 
     fun endSession() = viewModelScope.launch {
+        setQrMode(false); qrOn.value = false
         active.value?.let { dao.endSession(it.sessionId.toString(), System.currentTimeMillis()) }
         active.value = null
     }

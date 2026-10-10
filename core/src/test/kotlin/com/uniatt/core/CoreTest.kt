@@ -190,4 +190,104 @@ class CoreTest {
         assertEquals(listOf(RSlot(1, 0, 480, 570, "قاعة 3")), Schedule.decode(Schedule.encode(listOf(slots[0]))))
         assertEquals("الأحد 08:00–09:30 (قاعة 3)، الثلاثاء 10:00–11:30", Schedule.describeAll(slots, 1))
     }
+
+    // ---- بديل QR (تحدٍّ وإجابة) ----
+    @Test fun qrChallengeRoundTripAndRejects() {
+        val r = req()
+        val t = QrProtocol.challengeText(r)
+        val back = QrProtocol.parseChallenge(t)!!
+        assertArrayEquals(r.sessionId, back.sessionId); assertArrayEquals(r.nonce, back.nonce); assertEquals(r.timeMs, back.timeMs)
+        assertNull(QrProtocol.parseChallenge(t.replace("UAC1", "UAC2")))
+        assertNull(QrProtocol.parseChallenge(t.dropLast(4)))
+        assertNull(QrProtocol.parseChallenge("hello"))
+        assertNull(QrProtocol.parseChallenge("UAC1|!!!"))
+    }
+
+    @Test fun qrFullChallengeReplyFlow() {
+        val code = Codes.random(); val tag = Codes.tag(code); val key = Kdf.studentKey(code)
+        val kp = ec(); val pub = EcKey.rawFromX509(kp.public.encoded)!!
+        var now = 1_000_000L
+        val ch = QrChallenges(clock = { now })
+        val sid = UUID.randomUUID()
+        // الدكتور يصدر تحدّيًا ويعرضه
+        val shown = QrProtocol.challengeText(ch.issue(sid))
+        // الطالب يمسحه ويحسب الإجابة كما في خدمة NFC
+        val req = QrProtocol.parseChallenge(shown)!!
+        val proof = Hmac.sha256(key, Protocol.bindMessage(tag, pub, req))
+        val sig = sign(kp.private, Protocol.signedBytes(tag, pub, req))
+        val replyTxt = QrProtocol.replyText(req.nonce, Protocol.AttendReply(tag, pub, proof, sig))
+        // الدكتور يمسح الإجابة ويتحقق
+        val pr = QrProtocol.parseReply(replyTxt)!!
+        val mine = ch.find(pr.nonce)!!
+        assertEquals(tag, pr.reply.tag)
+        assertTrue(Hmac.equal(Hmac.sha256(key, Protocol.bindMessage(pr.reply.tag, pr.reply.pub, mine)), pr.reply.proof))
+        assertTrue(SigVerifier.verify(pr.reply.pub, Protocol.signedBytes(pr.reply.tag, pr.reply.pub, mine), pr.reply.sig))
+        assertTrue(replyTxt.length < 400)                                    // يتّسع في QR مقروء
+        // nonce لم يصدر عن هاتف الدكتور => لا تحدّي
+        assertNull(ch.find(ByteArray(16) { 7 }))
+        // انتهاء الصلاحية بعد 60 ثانية
+        now += 61_000
+        assertNull(ch.find(pr.nonce))
+    }
+
+    @Test fun qrReplyRejectsTamperAndGarbage() {
+        val code = Codes.random(); val tag = Codes.tag(code); val key = Kdf.studentKey(code)
+        val kp = ec(); val pub = EcKey.rawFromX509(kp.public.encoded)!!
+        val r = req()
+        val txt = QrProtocol.replyText(r.nonce, Protocol.AttendReply(tag, pub, Hmac.sha256(key, Protocol.bindMessage(tag, pub, r)), sign(kp.private, Protocol.signedBytes(tag, pub, r))))
+        assertNull(QrProtocol.parseReply(txt.replace("UAR1", "UAC1")))
+        assertNull(QrProtocol.parseReply("UAR1|abc"))
+        assertNull(QrProtocol.parseReply(txt.substringBeforeLast('|') + "|AAAA"))
+        // تعديل حرف داخل الإجابة => إمّا يفشل التحليل أو يفشل إثبات الكود/التوقيع
+        val i = txt.lastIndexOf('|') + 20
+        val tampered = txt.substring(0, i) + (if (txt[i] == 'A') 'B' else 'A') + txt.substring(i + 1)
+        val pr = QrProtocol.parseReply(tampered)
+        if (pr != null) assertFalse(Hmac.equal(Hmac.sha256(key, Protocol.bindMessage(pr.reply.tag, pr.reply.pub, r)), pr.reply.proof) &&
+            SigVerifier.verify(pr.reply.pub, Protocol.signedBytes(pr.reply.tag, pr.reply.pub, r), pr.reply.sig))
+    }
+
+    // ---- بلوتوث BLE ----
+    @Test fun bleChallengeAndChunkedReplyRoundTrip() {
+        val code = Codes.random(); val tag = Codes.tag(code); val key = Kdf.studentKey(code)
+        val kp = ec(); val pub = EcKey.rawFromX509(kp.public.encoded)!!
+        val ch = QrChallenges()
+        val req0 = ch.issue(UUID.randomUUID())
+        val req = BleProtocol.parseChallenge(BleProtocol.challengeBytes(req0))!!
+        val proof = Hmac.sha256(key, Protocol.bindMessage(tag, pub, req))
+        val sig = sign(kp.private, Protocol.signedBytes(tag, pub, req))
+        val payload = BleProtocol.replyPayload(req.nonce, Protocol.AttendReply(tag, pub, proof, sig))
+        val chunks = BleProtocol.chunk(payload, 18)               // أسوأ حالة: MTU افتراضي (20 بايت)
+        assertTrue(chunks.all { it.size <= 20 })
+        val asm = ProfileAssembler()
+        var got: ByteArray? = null
+        chunks.forEach { got = BleProtocol.add(asm, it) ?: got }
+        assertArrayEquals(payload, got!!)
+        val pr = BleProtocol.parseReplyPayload(got!!)!!
+        val mine = ch.find(pr.nonce)!!
+        assertTrue(Hmac.equal(Hmac.sha256(key, Protocol.bindMessage(pr.reply.tag, pr.reply.pub, mine)), pr.reply.proof))
+        assertTrue(SigVerifier.verify(pr.reply.pub, Protocol.signedBytes(pr.reply.tag, pr.reply.pub, mine), pr.reply.sig))
+    }
+
+    @Test fun bleChunkingRejectsDisorderAndBadInput() {
+        val payload = ByteArray(100) { it.toByte() }
+        val chunks = BleProtocol.chunk(payload, 30)
+        assertNull(BleProtocol.add(ProfileAssembler(), chunks[1]))            // لا تبدأ إلا من القطعة 0
+        val asm2 = ProfileAssembler()
+        assertNull(BleProtocol.add(asm2, chunks[0])); assertNull(BleProtocol.add(asm2, chunks[2]))   // خارج الترتيب
+        assertNull(BleProtocol.add(ProfileAssembler(), byteArrayOf(0, 0, 1)))
+        assertNull(BleProtocol.add(ProfileAssembler(), byteArrayOf(5, 2, 1)))
+        assertNull(BleProtocol.parseChallenge(ByteArray(39)))
+        assertNull(BleProtocol.parseReplyPayload(ByteArray(10)))
+        assertNull(BleProtocol.parseReplyPayload(ByteArray(60)))
+    }
+
+    @Test fun bleResultEncoding() {
+        val prof = byteArrayOf(1, 2, 3)
+        val ok = BleProtocol.decodeResult(BleProtocol.encodeResult(Status.OK, prof))!!
+        assertEquals(Status.OK, ok.status); assertArrayEquals(prof, ok.profile!!)
+        val bad = BleProtocol.decodeResult(BleProtocol.encodeResult(Status.NOT_ENROLLED, prof))!!
+        assertEquals(Status.NOT_ENROLLED, bad.status); assertNull(bad.profile)
+        assertNull(BleProtocol.decodeResult(byteArrayOf(BleProtocol.NO_RESULT)))
+        assertNull(BleProtocol.decodeResult(ByteArray(0)))
+    }
 }

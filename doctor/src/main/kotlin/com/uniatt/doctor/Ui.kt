@@ -192,6 +192,21 @@ fun LiveScreen(vm: DoctorVM, nfcInfo: () -> Pair<Boolean, String>) {
     val contacts by vm.contacts.collectAsState()
     val test by vm.testMode.collectAsState()
     val compat by vm.compat.collectAsState()
+    val bleOn by vm.bleOn.collectAsState()
+    val bleState by vm.bleState.collectAsState()
+    val bleClients by vm.bleClients.collectAsState()
+    val qrOn by vm.qrOn.collectAsState()
+    val qrText by vm.qrChallenge.collectAsState()
+    val scanHolder = remember { mutableListOf<() -> Unit>() }
+    val scanOptions = remember {
+        ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            .setPrompt("وجّه الكاميرا نحو رمز إجابة الطالب").setBeepEnabled(true).setOrientationLocked(false)
+    }
+    val replyScanner = rememberLauncherForActivityResult(ScanContract()) { res ->
+        // متتابع: بعد كل طالب يُعاد فتح الماسح تلقائيًا حتى تضغط رجوع
+        res.contents?.let { vm.onQrReply(it); scanHolder.firstOrNull()?.invoke() }
+    }
+    scanHolder.clear(); scanHolder.add { replyScanner.launch(scanOptions) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("الحضور المباشر", style = MaterialTheme.typography.headlineSmall)
         Text(msg, color = if (ok) Green else Red)
@@ -240,6 +255,33 @@ fun LiveScreen(vm: DoctorVM, nfcInfo: () -> Pair<Boolean, String>) {
                     Text("وضع استقبال الحضور — قرّبوا الهواتف", style = MaterialTheme.typography.titleMedium)
                     Text("المادة: ${active!!.course.name} | حضر: ${live.size}")
                     Text("تنتهي: ${fmtTime(active!!.endsAt)}")
+                }
+            }
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Switch(checked = bleOn, onCheckedChange = { vm.bleOn.value = it })
+                        Text("الحضور التلقائي بالبلوتوث", style = MaterialTheme.typography.titleSmall)
+                    }
+                    Text(
+                        "الحالة: ${bleState.ifBlank { "—" }} — اتصالات وصلت: $bleClients\nالطلاب (المفعّل عندهم التسجيل التلقائي) يُسجَّلون دون أي لمسة؛ قد تستغرق القاعات الكبيرة حتى نصف دقيقة. أبقِ هذه الشاشة مفتوحة.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (bleState.startsWith("شغّال")) Green else Color.Unspecified
+                    )
+                }
+            }
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Switch(checked = qrOn, onCheckedChange = { vm.qrOn.value = it; vm.setQrMode(it) })
+                        Text("بديل NFC: تسجيل بالـQR", style = MaterialTheme.typography.titleSmall)
+                    }
+                    if (qrOn) {
+                        Text("① الطالب يفتح تطبيقه ← «تسجيل بالـQR» ← يمسح الرمز أدناه (يتغيّر كل 10 ثوانٍ).\n② يعرض الطالب رمز إجابة ← اضغط «مسح إجابة طالب» ووجّه الكاميرا نحوه. يبقى الماسح مفتوحًا للطالب التالي حتى تضغط رجوع.",
+                            style = MaterialTheme.typography.bodySmall)
+                        qrText?.let { QrCode(it, Modifier.size(260.dp)) }
+                        Button(onClick = { scanHolder.firstOrNull()?.invoke() }, modifier = Modifier.fillMaxWidth()) { Text("مسح إجابة طالب") }
+                    }
                 }
             }
             OutlinedButton(onClick = { vm.endSession() }, modifier = Modifier.fillMaxWidth()) { Text("إنهاء الجلسة") }
